@@ -90,13 +90,19 @@ function Get-HostMetrics {
 
   $totalB = [int64]$cs.TotalPhysicalMemory
   $freeB  = [int64]$os.FreePhysicalMemory * 1KB
-  $cpu    = (Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average
+  # Win32_Processor.LoadPercentage is coarse and reads 0 at anything near idle —
+  # measured 0, 0, 2 while the performance counter said 5.1. The counter is the
+  # accurate source, but its path is localised, so a non-English Windows throws
+  # and falls back rather than reporting nothing.
+  $cpu = $null
+  try { $cpu = [math]::Round((Get-Counter '\Processor(_Total)\% Processor Time' -ErrorAction Stop).CounterSamples.CookedValue, 1) } catch { }
+  if ($null -eq $cpu) { $cpu = (Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average }
 
   [ordered]@{
     hostname       = $env:COMPUTERNAME
     platform       = 'windows'
     uptimeSeconds  = [int]((Get-Date) - $os.LastBootUpTime).TotalSeconds
-    cpuPercent     = [int]$(if ($null -ne $cpu) { $cpu } else { 0 })
+    cpuPercent     = $(if ($null -ne $cpu) { [math]::Round([double]$cpu, 1) } else { $null })
     cpuCount       = [int]$cs.NumberOfLogicalProcessors
     memory = [ordered]@{
       totalBytes     = $totalB
