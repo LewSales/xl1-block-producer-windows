@@ -1,0 +1,125 @@
+<#
+.SYNOPSIS
+  Run every check in this bundle. Windows equivalent of the Pi's tests/run.sh.
+
+.DESCRIPTION
+  Nothing here needs Docker, a producer, or the network. The dashboard's SDK is
+  stubbed when it is not installed: server.mjs imports it at load time, but none
+  of the decisions under test touch it, and requiring a 100 MB install to test a
+  version comparison makes a suite people skip.
+
+  dashboard/ is shared source with the Pi bundle, so tests/dashboard.test.mjs is
+  the same file there. Keep it that way -- a divergence here is how the two
+  copies quietly stop being the same dashboard.
+
+.EXAMPLE
+  powershell -ExecutionPolicy Bypass -File .\Tests.ps1
+#>
+[CmdletBinding()]
+param()
+
+$ErrorActionPreference = 'Stop'
+$Root = $PSScriptRoot
+$script:Failed = 0
+
+function Step { param($m) Write-Host "`n==> $m" -ForegroundColor White }
+function Ok   { param($m) Write-Host "  [ok] $m" -ForegroundColor Green }
+function Bad  { param($m) Write-Host "  [!!] $m" -ForegroundColor Red; $script:Failed++ }
+function Skip { param($m) Write-Host "  $m" -ForegroundColor DarkGray }
+
+# ------------------------------------------------------------ PowerShell parse
+#
+# The parser, not execution. Every one of these scripts talks to Docker or the
+# scheduler, so running them is not a test -- but a syntax error in the
+# collector only shows up as a status file that silently stops updating.
+Step 'PowerShell syntax'
+foreach ($f in @(
+  (Join-Path $Root 'Setup.ps1'),
+  (Join-Path $Root 'Build.ps1'),
+  (Join-Path $Root 'Tests.ps1'),
+  (Join-Path $Root 'scripts\xl1ctl.ps1'),
+  (Join-Path $Root 'scripts\xl1-collect.ps1')
+)) {
+  if (-not (Test-Path $f)) { Bad "$(Split-Path -Leaf $f) -- missing"; continue }
+  $errors = $null
+  [System.Management.Automation.Language.Parser]::ParseFile($f, [ref]$null, [ref]$errors) | Out-Null
+  if ($errors.Count) { Bad "$(Split-Path -Leaf $f) -- $($errors[0].Message)" }
+  else { Ok (Split-Path -Leaf $f) }
+}
+
+# ------------------------------------------------------------------ JavaScript
+$node = Get-Command node -ErrorAction SilentlyContinue
+
+Step 'JavaScript syntax'
+if (-not $node) {
+  Skip 'node not on PATH; JavaScript checks skipped'
+} else {
+  foreach ($f in @(
+    (Join-Path $Root 'dashboard\server.mjs'),
+    (Join-Path $Root 'tests\dashboard.test.mjs')
+  )) {
+    & node --check $f 2>$null
+    if ($LASTEXITCODE -eq 0) { Ok (Split-Path -Leaf $f) } else { Bad "$(Split-Path -Leaf $f) -- syntax error" }
+  }
+
+  # The panel is one inline script. A syntax error there is a blank page with
+  # the message only in a console nobody has open.
+  $html = (Get-Content (Join-Path $Root 'dashboard\index.html') -Raw)
+  $m = [regex]::Match($html, '(?s)<script>(.*)</script>')
+  if ($m.Success) {
+    $tmp = Join-Path $env:TEMP "xl1-panel-$PID.mjs"
+    Set-Content -Path $tmp -Value $m.Groups[1].Value -Encoding UTF8
+    & node --check $tmp 2>$null
+    if ($LASTEXITCODE -eq 0) { Ok 'index.html inline script parses' } else { Bad 'index.html inline script does not parse' }
+    Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+  } else { Bad 'index.html has no inline script' }
+}
+
+# ----------------------------------------------------------------- attribution
+#
+# Someone shown a screenshot of this should not come away thinking XYO shipped
+# it. Asserted so a refactor cannot quietly drop the disclaimer.
+Step 'Attribution'
+foreach ($pair in @(
+  @{ file = 'dashboard\index.html'; needle = 'not affiliated with' },
+  @{ file = 'README.md';            needle = 'Not affiliated with' }
+)) {
+  $path = Join-Path $Root $pair.file
+  if (Select-String -Path $path -Pattern $pair.needle -SimpleMatch -Quiet) {
+    Ok "$($pair.file) states it is unofficial"
+  } else {
+    Bad "$($pair.file) no longer says it is unaffiliated with XYO"
+  }
+}
+
+# ---------------------------------------------------------- dashboard behaviour
+Step 'Dashboard behaviour'
+if (-not $node) {
+  Skip 'node not on PATH; dashboard tests skipped'
+} else {
+  $sdk = Join-Path $Root 'dashboard\node_modules\@xyo-network\xl1-sdk'
+  $stubbed = $false
+  if (-not (Test-Path $sdk)) {
+    New-Item -ItemType Directory -Path $sdk -Force | Out-Null
+    Copy-Item (Join-Path $Root 'tests\stubs\xl1-sdk-stub.mjs') (Join-Path $sdk 'index.mjs') -Force
+    Set-Content -Path (Join-Path $sdk 'package.json') -Encoding UTF8 `
+      -Value '{"name":"@xyo-network/xl1-sdk","version":"0.0.0-stub","type":"module","main":"index.mjs","exports":"./index.mjs"}'
+    $stubbed = $true
+    Skip 'using a stubbed SDK (real one not installed)'
+  }
+
+  try {
+    & node --test (Join-Path $Root 'tests\dashboard.test.mjs')
+    if ($LASTEXITCODE -eq 0) { Ok 'dashboard tests passed' } else { Bad 'dashboard tests failed' }
+  } finally {
+    # Only what this script created. A real install is the operator's.
+    if ($stubbed) { Remove-Item (Join-Path $Root 'dashboard\node_modules') -Recurse -Force -ErrorAction SilentlyContinue }
+  }
+}
+
+Write-Host ''
+if ($script:Failed) {
+  Write-Host "$($script:Failed) check(s) failed`n" -ForegroundColor Red
+  exit 1
+}
+Write-Host "everything passed`n" -ForegroundColor Green

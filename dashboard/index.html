@@ -1,0 +1,546 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>XL1 Producer</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f7f9; --panel: #ffffff; --line: #e3e6ea;
+    --fg: #14171a; --muted: #666e78;
+    --ok: #1a7f47; --warn: #a86500; --bad: #b3261e; --accent: #572aff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1013; --panel: #171a1f; --line: #262b33;
+      --fg: #e8eaed; --muted: #939ba6;
+      --ok: #4ec97f; --warn: #e0a341; --bad: #ef6a60; --accent: #8f74ff;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+    padding: 18px 20px; border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  h1 { margin: 0; font-size: 17px; letter-spacing: -0.01em; }
+  .net { color: var(--muted); font-size: 13px; }
+  .spacer { flex: 1; }
+  .pill {
+    padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;
+    border: 1px solid transparent;
+  }
+  .pill.ok { color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); border-color: color-mix(in srgb, var(--ok) 32%, transparent); }
+  .pill.degraded { color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, transparent); border-color: color-mix(in srgb, var(--warn) 32%, transparent); }
+  .pill.down { color: var(--bad); background: color-mix(in srgb, var(--bad) 12%, transparent); border-color: color-mix(in srgb, var(--bad) 32%, transparent); }
+  main { padding: 20px; display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(310px, 1fr)); max-width: 1400px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+  section h2 { margin: 0 0 12px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); font-weight: 600; }
+  dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 7px 16px; align-items: baseline; }
+  dt { color: var(--muted); white-space: nowrap; }
+  dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  .big { font-size: 26px; font-weight: 650; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+  .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+  .bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; margin-top: 6px; }
+  .bar > i { display: block; height: 100%; background: var(--accent); }
+  .bar > i.warn { background: var(--warn); } .bar > i.bad { background: var(--bad); }
+  ul.problems { margin: 10px 0 0; padding-left: 18px; color: var(--warn); }
+  /* Standings. A wide table on a 480px phone must scroll inside its own box
+     rather than stretching the page sideways. */
+  .board-wrap { overflow-x: auto; margin-top: 4px; }
+  table.board { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  table.board th { text-align: right; font-weight: 600; color: var(--muted); padding: 4px 6px; white-space: nowrap; }
+  table.board th:nth-child(2) { text-align: left; }
+  table.board td { padding: 4px 6px; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  table.board td:nth-child(2) { text-align: left; }
+  table.board tr.self { background: color-mix(in srgb, var(--accent) 14%, transparent); font-weight: 650; }
+  table.board tr + tr td { border-top: 1px solid var(--line); }
+  table.board tr.gap td { border-top: 2px dashed var(--line); }
+  .peer-name { font-weight: 600; margin-right: 4px; }
+  /* Four columns stretched across a 1280px card put the name and its numbers at
+     opposite edges, which is a lot of eye travel to compare two rows. */
+  table.board { max-width: 760px; }
+  .peer-bar { height: 7px; border-radius: 3px; background: var(--line); overflow: hidden; min-width: 60px; }
+  .peer-bar > i { display: block; height: 100%; background: color-mix(in srgb, var(--c-peers) 70%, transparent); }
+  table.board tr.self .peer-bar > i { background: var(--accent); }
+  table.board td.barcell { width: 40%; padding-left: 14px; }
+  pre.log {
+    margin: 0; padding: 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px;
+    max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  footer { padding: 0 20px 28px; color: var(--muted); font-size: 12px; }
+  a { color: var(--accent); }
+  .err { color: var(--bad); font-size: 12.5px; }
+
+  /* Stat tiles. A dense grid reads faster than a long definition list once
+     there are more than about six figures to take in at a glance. */
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(126px, 1fr)); gap: 10px; margin-top: 12px; }
+  .tile { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .tile .k { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.07em; font-weight: 600; }
+  .tile .v { font-size: 19px; font-weight: 640; letter-spacing: -0.015em; font-variant-numeric: tabular-nums; margin-top: 4px; }
+  .tile .n { color: var(--muted); font-size: 11px; margin-top: 2px; }
+
+  /* Sparklines. preserveAspectRatio="none" stretches the box to the card, so
+     the stroke needs non-scaling-stroke or it thins out as the card widens. */
+  .spark { display: block; width: 100%; height: 40px; margin-top: 12px; overflow: visible; }
+  .spark path.line { fill: none; stroke: var(--accent); stroke-width: 1.6; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
+  .spark path.area { fill: color-mix(in srgb, var(--accent) 13%, transparent); stroke: none; }
+  .spark.ok path.line { stroke: var(--ok); } .spark.ok path.area { fill: color-mix(in srgb, var(--ok) 13%, transparent); }
+  .sparkfoot { display: flex; justify-content: space-between; color: var(--muted); font-size: 10.5px; margin-top: 3px; }
+  .wide { grid-column: 1 / -1; }
+
+  /* Per-card accent. One hue per subject, carried by the heading, the rule
+     under it and that card's sparkline, so a glance finds the right panel
+     before the words are read. Set with style="--c: var(--c-chain)". */
+  :root {
+    --c-producer: #2f7ae5; --c-chain: #7a4ddb; --c-rewards: #1a7f47;
+    --c-software: #b4690e; --c-trend: #0d7c8f; --c-pi: #c0392b; --c-log: #5b6472;
+    --c-peers: #8a5a2b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --c-producer: #6aa8ff; --c-chain: #a98bff; --c-rewards: #4ec97f;
+      --c-software: #e0a341; --c-trend: #48c3d6; --c-pi: #ff8a7a; --c-log: #9aa4b2;
+      --c-peers: #d7a06a;
+    }
+  }
+  section { position: relative; overflow: hidden; }
+  /* A hairline of the card's own colour along the top edge. */
+  section[style*="--c"]::before {
+    content: ""; position: absolute; inset: 0 0 auto 0; height: 2px;
+    background: linear-gradient(90deg, var(--c), transparent 70%);
+  }
+  section h2 { display: flex; align-items: center; gap: 7px; }
+  section[style*="--c"] h2 { color: var(--c); }
+  section[style*="--c"] .spark path.line { stroke: var(--c); }
+  section[style*="--c"] .spark path.area { fill: color-mix(in srgb, var(--c) 14%, transparent); }
+  section[style*="--c"] .bar > i:not(.warn):not(.bad) { background: var(--c); }
+  .ico { font-size: 14px; line-height: 1; filter: saturate(1.1); }
+
+  /* Attribution. Deliberately plain — it is a disclaimer, not a badge. */
+  .whose {
+    margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line);
+    display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap;
+  }
+  .whose .who { font-weight: 600; color: var(--fg); }
+  .whose .sep { color: var(--line); }
+  .chip {
+    font-size: 10.5px; padding: 2px 7px; border-radius: 999px; font-weight: 600;
+    letter-spacing: 0.03em; border: 1px solid var(--line); color: var(--muted);
+    white-space: nowrap;
+  }
+  .logfoot { color: var(--muted); font-size: 11px; margin-top: 7px; }
+  .banner {
+    margin-top: 12px; padding: 10px 12px; border-radius: 8px; font-size: 12.5px;
+    border: 1px solid color-mix(in srgb, var(--bad) 35%, transparent);
+    background: color-mix(in srgb, var(--bad) 10%, transparent); color: var(--fg);
+  }
+  .banner b { color: var(--bad); }
+</style>
+</head>
+<body>
+<header>
+  <h1>⛏️ XL1 Block Producer</h1>
+  <span class="chip" title="An independent project. Not built, endorsed, or supported by XYO.">unofficial</span>
+  <span class="net" id="net">—</span>
+  <span class="spacer"></span>
+  <span class="pill" id="overall">connecting…</span>
+</header>
+<main id="grid"></main>
+<footer id="foot">—</footer>
+
+<script>
+const $ = (id) => document.getElementById(id)
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
+const num = (n) => (n === undefined || n === null || Number.isNaN(n)) ? '—' : Number(n).toLocaleString()
+const bytes = (b) => {
+  if (!b && b !== 0) return '—'
+  const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0; let v = b
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++ }
+  return `${v.toFixed(v < 10 && i > 0 ? 1 : 0)} ${u[i]}`
+}
+const dur = (s) => {
+  if (s === undefined || s === null) return '—'
+  const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60)
+  return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`
+}
+const dl = (rows) => `<dl>${rows.filter(Boolean).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join('')}</dl>`
+const tiles = (items) => `<div class="tiles">${items.filter(Boolean).map(([k, v, n]) =>
+  `<div class="tile"><div class="k">${esc(k)}</div><div class="v">${v}</div>${n ? `<div class="n">${n}</div>` : ''}</div>`).join('')}</div>`
+
+/** A sparkline from a history series. Says "collecting" rather than drawing a
+ *  flat line from one point — an empty chart that looks like a dead one is
+ *  worse than an honest label. */
+const spark = (series, cls = '') => {
+  const pts = (series ?? []).map((p) => Number(p.v)).filter((v) => !Number.isNaN(v))
+  if (pts.length < 2) return `<div class="sub" style="margin-top:10px">collecting — needs a few more samples</div>`
+  const min = Math.min(...pts), max = Math.max(...pts), span = (max - min) || 1
+  const W = 100, H = 40
+  const d = pts.map((v, i) => `${((i / (pts.length - 1)) * W).toFixed(2)},${(H - ((v - min) / span) * H).toFixed(2)}`)
+  const fmt = (v) => Math.abs(v) >= 1000 ? Math.round(v).toLocaleString() : Number(v.toFixed(2)).toLocaleString()
+  return `<svg class="spark ${cls}" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">
+      <path class="area" d="M0,${H} L${d.join(' L')} L${W},${H} Z"/>
+      <path class="line" d="M${d.join(' L')}"/>
+    </svg>
+    <div class="sparkfoot"><span>${fmt(min)}</span><span>${pts.length} samples</span><span>${fmt(max)}</span></div>`
+}
+
+const bar = (pct, warnAt = 70, badAt = 90) => {
+  const p = Math.max(0, Math.min(100, pct ?? 0))
+  const cls = p >= badAt ? 'bad' : p >= warnAt ? 'warn' : ''
+  return `<div class="bar"><i class="${cls}" style="width:${p}%"></i></div>`
+}
+
+function render(d) {
+  $('overall').textContent = d.status === 'ok' ? 'healthy' : d.status
+  $('overall').className = `pill ${d.status}`
+  $('net').textContent = d.chain?.ok ? `${d.chain.networkName} · chain ${d.chain.chainId.slice(0, 10)}…` : 'chain unreachable'
+
+  const cards = []
+  const dv = d.derived ?? {}
+
+  // The one thing that explains a healthy node producing nothing. Loud, at the
+  // top, in its own banner — it is the answer to the question everything else
+  // on this page raises but cannot settle.
+  if (d.node?.eligibility?.blocked && !d.node?.eligibilityIgnored) {
+    cards.push(`<section class="wide" style="border-color:color-mix(in srgb,var(--bad) 40%,transparent)">
+      <h2><span class="ico" aria-hidden="true">⛔</span>Producer cannot produce</h2>
+      <div class="big bad">${esc(d.node.eligibility.reason)}</div>
+      <div class="sub">the node said so itself, within the last ${esc(d.node.eligibility.window)}</div>
+      <div class="banner">Every other signal here can read perfectly healthy while this is true.
+        The container runs, the health probe passes, the chain is reachable — and no block this node
+        builds will be accepted.</div>
+    </section>`)
+  }
+
+  // Producer
+  const c = d.node?.container
+  const healthClass = d.health?.ok ? 'ok' : 'bad'
+  cards.push(`<section style="--c: var(--c-producer)">
+    <h2><span class="ico" aria-hidden="true">⚙️</span>Producer</h2>
+    <div class="big ${healthClass}">${d.health?.ok ? 'Live' : 'Not responding'}</div>
+    <div class="sub">/livez on ${esc(d.health?.endpoint ?? '')}</div>
+    ${dl([
+      ['Container', c ? `<span class="${c.running ? 'ok' : 'bad'}">${esc(c.state ?? '—')}</span>` : '—'],
+      c && ['Container uptime', esc(c.uptime ?? '—')],
+      c && ['Restarts', `${num(c.restartCount)}${c.restartCount > 3 ? ' <span class="warn">⚠</span>' : ''}`],
+      c && ['Image', `<span class="mono">${esc(c.image ?? '—')}</span>`],
+      dv.producedObserved !== undefined && ['Blocks produced',
+        `<span class="${dv.producedObserved > 0 ? 'ok' : ''}">${num(dv.producedObserved)}</span>`
+        + (dv.producedSince !== undefined ? ` <span class="sub">since #${num(dv.producedSince)}</span>` : '')],
+      dv.producedSharePercent !== undefined && ['Share of chain', `${dv.producedSharePercent}%`],
+      dv.lastBlock !== undefined && ['Last produced', dv.lastBlockUrl
+        ? `<a href="${esc(dv.lastBlockUrl)}" target="_blank" rel="noopener noreferrer">#${num(dv.lastBlock)}</a>`
+        : `#${num(dv.lastBlock)}`],
+      dv.blocksSinceLast !== undefined && ['Blocks since', `${num(dv.blocksSinceLast)} ago`],
+      dv.lastBlock === undefined && dv.producedObserved === 0 &&
+        ['Last produced', '<span class="sub">none in the observed range</span>'],
+      dv.productionError && ['Block scan', `<span class="warn">${esc(dv.productionError)}</span>`],
+      d.node?.errorCount !== undefined && ['Log errors', `<span class="${d.node.errorCount > 0 ? 'warn' : ''}">${num(d.node.errorCount)}</span>`],
+      d.node?.eligibility && ['Eligibility', d.node.eligibility.blocked
+        ? (d.node.eligibilityIgnored
+            ? `<span class="sub">${esc(d.node.eligibility.reason)}</span> <span class="ok">· ${esc(d.node.eligibilityNote ?? 'not enforced here')}</span>`
+            : `<span class="bad">${esc(d.node.eligibility.reason)}</span>`)
+        : `<span class="ok">no complaint in ${esc(d.node.eligibility.window)}</span>`],
+    ])}
+    ${d.node?.ok === false ? `<div class="err" style="margin-top:8px">${esc(d.node.error)}</div>` : ''}
+    ${d.node?.stale ? `<div class="err" style="margin-top:8px">collector data ${d.node.ageSeconds}s old</div>` : ''}
+  </section>`)
+
+  // Chain
+  if (d.chain?.ok) {
+    cards.push(`<section style="--c: var(--c-chain)">
+      <h2><span class="ico" aria-hidden="true">⛓️</span>Chain</h2>
+      <div class="big">${num(d.chain.currentBlock)}</div>
+      <div class="sub">current block · finalized ${num(d.chain.finalizedBlock)}</div>
+      ${dl([
+        ['Finalization lag', `${num(d.chain.finalizationLag)} blocks`],
+        ['Chain ID', `<span class="mono">${esc(d.chain.chainId)}</span>`],
+        ['Matches preset', d.chain.chainIdMatchesPreset ? '<span class="ok">yes</span>' : '<span class="bad">NO</span>'],
+        ['Explorer', `<a href="${esc(d.chain.explorerUrl)}" target="_blank" rel="noopener noreferrer">open</a>`],
+      ])}
+      ${spark(d.history?.height)}
+      ${tiles([
+        ['Block time', dv.secondsPerBlock ? `${dv.secondsPerBlock}s` : '—', 'observed'],
+        ['Chain rate', dv.blocksPerHourChain !== undefined ? `${num(dv.blocksPerHourChain)}/h` : '—', 'blocks per hour'],
+        ['Watching', dv.observedSeconds ? dur(dv.observedSeconds) : '—', `${num(dv.samples)} samples`],
+      ])}
+    </section>`)
+  } else {
+    cards.push(`<section style="--c: var(--c-chain)"><h2><span class="ico" aria-hidden="true">⛓️</span>Chain</h2><div class="big bad">Unreachable</div>
+      <div class="err" style="margin-top:8px">${esc(d.chain?.error ?? 'unknown')}</div></section>`)
+  }
+
+  // Rewards
+  const b = d.chain?.balances ?? {}
+  // Addresses link straight into the explorer — the lookup an operator does most.
+  const addrCell = (x) => x?.url
+    ? `<a class="mono" href="${esc(x.url)}" target="_blank" rel="noopener noreferrer">${esc(x.address)}</a>`
+    : `<span class="mono">${esc(x?.address)}</span>`
+  if (b.reward || b.producer) {
+    cards.push(`<section style="--c: var(--c-rewards)">
+      <h2><span class="ico" aria-hidden="true">💰</span>Rewards</h2>
+      ${b.reward?.xl1 ? `<div class="big">${esc(b.reward.xl1)} <span style="font-size:14px;color:var(--muted)">XL1</span></div>
+        <div class="sub">reward address balance</div>` : ''}
+      ${dl([
+        b.reward?.sinceStart && ['Since dashboard start', `${esc(b.reward.sinceStart.xl1)} XL1`],
+        b.reward && ['Reward address', addrCell(b.reward)],
+        b.reward?.error && ['Reward lookup', `<span class="bad">${esc(b.reward.error)}</span>`],
+        b.producer?.xl1 && ['Producer balance', `${esc(b.producer.xl1)} XL1`],
+        b.producer && ['Producer address', addrCell(b.producer)],
+        dv.rewardEqualsProducer && ['Signer', '<span class="ok">same as reward address</span>'],
+      ])}
+      ${spark(d.history?.reward, 'ok')}
+      ${tiles([
+        ['Per hour', dv.rewardPerHour !== undefined ? `${num(dv.rewardPerHour)}` : '—', 'XL1 observed'],
+        ['Per day', dv.rewardPerDay !== undefined ? `${num(dv.rewardPerDay)}` : '—',
+          dv.rewardPerDay !== undefined ? 'extrapolated' : `needs ${Math.max(0, 15 - Math.round((dv.observedSeconds ?? 0) / 60))}m more`],
+        ['Blocks/hr', dv.blocksPerHourNode !== undefined ? `${num(dv.blocksPerHourNode)}` : '—', 'produced by this node'],
+      ])}
+    </section>`)
+  }
+
+  // Software and host — the two layers that rot quietly while every other
+  // signal on this page stays green.
+  const rel = d.release ?? {}
+  const osi = d.node?.os
+  if (rel.installed || rel.latest || osi) {
+    const lagCell = rel.lag === 'behind'
+      ? `<span class="warn">${esc(rel.installed)} → ${esc(rel.latest)} available</span>`
+      : rel.lag === 'current' ? `<span class="ok">${esc(rel.installed)} · current</span>`
+      : rel.installed ? `<span class="mono">${esc(rel.installed)}</span>`
+      : '<span class="sub">unknown</span>'
+
+    // apt answers against its last refresh, so the count is only as good as the
+    // lists. Show the age beside it rather than letting a stale zero pass as news.
+    const aptAge = osi?.aptAgeHours
+    const ageCell = aptAge === undefined ? '<span class="sub">unknown</span>'
+      : aptAge > 168 ? `<span class="bad">${Math.round(aptAge / 24)}d — count unreliable</span>`
+      : aptAge > 48 ? `<span class="warn">${Math.round(aptAge / 24)}d</span>`
+      : `<span class="ok">${aptAge < 1 ? '<1' : Math.round(aptAge)}h</span>`
+
+    cards.push(`<section style="--c: var(--c-software)">
+      <h2><span class="ico" aria-hidden="true">📦</span>Software &amp; host</h2>
+      <div class="big">${esc(rel.installed ?? '—')}</div>
+      <div class="sub">xl1&#8209;cli in the running container</div>
+      ${dl([
+        ['CLI version', lagCell],
+        rel.ok === false && !rel.disabled && ['Registry', `<span class="warn">${esc(rel.error ?? 'unreachable')}</span>`],
+        osi && ['Host updates', osi.updates > 0 ? `<span class="warn">${num(osi.updates)} pending</span>` : '<span class="ok">none pending</span>'],
+        osi && osi.securityUpdates > 0 && ['Security updates', `<span class="bad">${num(osi.securityUpdates)}</span>`],
+        osi && ['apt lists', ageCell],
+        osi?.rebootRequired && ['Reboot', '<span class="bad">required</span>'],
+      ])}
+      ${!osi ? '<div class="sub" style="margin-top:8px">host package check off or not yet run</div>' : ''}
+    </section>`)
+  }
+
+  // Trends — days, not minutes. The in-memory sparklines above reset with the
+  // container; this survives, which is the only way to answer "did it earn
+  // anything last week".
+  const tr = d.trend
+  if (tr && (tr.daily?.length || tr.error)) {
+    const days = tr.daily ?? []
+    const recent = days.slice(-14)
+    const maxB = Math.max(1, ...recent.map((x) => x.blocks))
+    const maxE = Math.max(1, ...recent.map((x) => x.earned))
+    const totalB = days.reduce((a, x) => a + x.blocks, 0)
+    const totalE = days.reduce((a, x) => a + x.earned, 0)
+    const bars = (vals, max) => `<div style="display:flex;align-items:flex-end;gap:2px;height:40px;margin-top:10px">${
+      vals.map((v) => `<div title="${esc(v.day)}: ${v.n}" style="flex:1;min-width:3px;border-radius:2px 2px 0 0;background:var(--c, var(--accent));height:${Math.max(2, (v.n / max) * 100)}%"></div>`).join('')}</div>`
+
+    // Nothing recorded yet is not zero blocks and a peak of one. Say what is
+    // actually true — that it has not been running long enough — rather than
+    // charting placeholders that read as a node which earned nothing.
+    const empty = days.length === 0
+    cards.push(`<section style="--c: var(--c-trend)">
+      <h2><span class="ico" aria-hidden="true">📈</span>Trends</h2>
+      ${tr.error ? `<div class="err">${esc(tr.error)}</div>` : ''}
+      ${empty ? `
+        <div class="big sub" style="font-size:16px">collecting…</div>
+        <div class="sub">One sample every 5 minutes. The first full day appears tomorrow;
+          history survives restarts once the store is writable.</div>
+      ` : `
+        <div class="big">${num(totalB)}</div>
+        <div class="sub">blocks over ${num(days.length)} day(s) · ${num(tr.points)} samples</div>
+        ${bars(recent.map((x) => ({ day: x.day, n: x.blocks })), maxB)}
+        <div class="sparkfoot"><span>blocks/day</span><span>peak ${num(maxB)}</span></div>
+        ${bars(recent.map((x) => ({ day: x.day, n: x.earned })), maxE)}
+        <div class="sparkfoot"><span>XL1/day</span><span>peak ${num(maxE)}</span></div>
+        ${tiles([
+          ['Earned', num(Number(totalE.toFixed(2))), `over ${num(days.length)}d`],
+          ['Retained', `${num(tr.retainDays)}d`, 'rolling window'],
+        ])}
+      `}
+    </section>`)
+  }
+
+  // System
+  const s = d.system
+  if (s?.ok) {
+    const t = s.throttle
+    // Headroom, not throttle state. The soft limit is raised to 70 °C at
+    // provision time and the hard limit is 85 °C, so 65 °C was amber for a
+    // machine that was working exactly as configured.
+    const tempCls = s.cpuTempC >= 80 ? 'bad' : s.cpuTempC >= 75 ? 'warn' : 'ok'
+    cards.push(`<section style="--c: var(--c-pi)">
+      <h2><span class="ico" aria-hidden="true">${s.platform === 'windows' ? '🖥️' : '🍓'}</span>${s.platform === 'windows' ? 'Host' : 'Raspberry Pi'}</h2>
+      <div class="big ${tempCls}">${s.cpuTempC ?? '—'}°C</div>
+      <div class="sub">${esc(s.hostname)} · up ${dur(s.uptimeSeconds)} · load ${s.loadAverage?.join(' ')}</div>
+      ${s.cpuTempC !== undefined ? spark(d.history?.tempC) : ''}
+      ${tiles([
+        ['RAM', `${s.memory.usedPercent}%`, `${bytes(s.memory.totalBytes - s.memory.availableBytes)} of ${bytes(s.memory.totalBytes)}`],
+        ['Swap', `${s.swap.usedPercent}%`, `${bytes(s.swap.usedBytes)} of ${bytes(s.swap.totalBytes)}`],
+        s.disk && ['Disk', `${s.disk.usedPercent}%`, `${bytes(s.disk.freeBytes)} free`],
+        s.cpuPercent !== undefined
+          ? ['CPU', `${s.cpuPercent}%`, `${s.cpuCount} cores`]
+          : ['Load', `${s.loadAverage?.[0] ?? '—'}`, `${s.cpuCount} cores`],
+        t && ['Power', t.undervoltageNow ? '<span class="bad">LOW</span>' : t.undervoltageSinceBoot ? '<span class="warn">dipped</span>' : '<span class="ok">stable</span>',
+              t.undervoltageNow ? 'undervolting now' : t.undervoltageSinceBoot ? 'since boot' : '5V holding'],
+        // Both limits, not just the hard one. Reading bits 2/18 alone showed
+        // "none" in green on a Pi whose soft limit had been clocking it from
+        // 1.4 GHz to 1.2 GHz — the gentler limit is the one a 3 B+ actually
+        // hits, so the tile was silent about the only throttling that happens.
+        t && ['Throttle',
+              t.throttledNow ? '<span class="bad">HARD</span>'
+              : t.softTempLimitNow ? '<span class="bad">HEAT</span>'
+              : (t.throttledSinceBoot || t.softTempLimitSinceBoot) ? '<span class="warn">earlier</span>'
+              : '<span class="ok">none</span>',
+              t.throttledNow ? '85°C limit reached'
+              : t.softTempLimitNow ? 'clocked down to 1.2 GHz'
+              : t.throttledSinceBoot ? '85°C limit, since boot'
+              : t.softTempLimitSinceBoot ? 'heat, since boot'
+              : 'full clock'],
+      ])}
+      ${bar(s.memory.usedPercent)}
+    </section>`)
+  }
+
+  // Producer standings — who else is signing blocks, and where we sit.
+  //
+  // Counted from the same scan that produces "Blocks produced" above, so the
+  // two can never disagree. The denominator is blocks actually read, which is
+  // why the sample size is printed rather than assumed from the height range.
+  const pb = d.peers
+  if (pb && pb.producers > 0) {
+    const short = (a) => `${String(a).slice(0, 6)}…${String(a).slice(-4)}`
+    // A named producer shows its name with the hex kept alongside, not replaced.
+    // The address is the identity; the label is a convenience, and dropping the
+    // hex would leave nothing to check a suspicious row against.
+    const nameCell = (r) => {
+      const name = r.label ?? (r.isSelf ? 'this node' : undefined)
+      const hex = r.url
+        ? `<a class="mono" href="${esc(r.url)}" target="_blank" rel="noopener noreferrer" title="${esc(r.address)}">${esc(short(r.address))}</a>`
+        : `<span class="mono" title="${esc(r.address)}">${esc(short(r.address))}</span>`
+      return name ? `<span class="peer-name">${esc(name)}</span> ${hex}` : hex
+    }
+
+    const rows = [...(pb.top ?? [])]
+    // Our own row matters more than the cut-off. If we rank below the visible
+    // top, show us anyway under a break rather than leaving the operator to
+    // conclude their node is not producing at all.
+    const shown = new Set(rows.map((r) => r.address))
+    const outside = pb.self && !shown.has(pb.self.address) ? pb.self : undefined
+
+    // Bars scale to the leader, not to 100. With six producers splitting a
+    // chain, every bar against a fixed 100 would be a stub and the ranking —
+    // the thing this table exists to show — would be invisible.
+    const lead = Math.max(...rows.map((r) => r.sharePercent ?? 0), (pb.self?.sharePercent ?? 0), 0.0001)
+    const tr_ = (r, cls = '') => `<tr class="${cls}${r.isSelf ? ' self' : ''}">
+      <td>${num(r.rank)}</td>
+      <td>${nameCell(r)}</td>
+      <td class="barcell"><div class="peer-bar"><i style="width:${Math.max(r.sharePercent ? 2 : 0, ((r.sharePercent ?? 0) / lead) * 100)}%"></i></div></td>
+      <td>${num(r.blocks)}</td>
+      <td>${r.sharePercent !== undefined ? `${r.sharePercent}%` : '—'}</td>
+    </tr>`
+
+    const leader = rows[0]
+    const mine = pb.self
+    // The comparison an operator actually wants: not the raw count, but how far
+    // off the top this node is. Same-rank-1 says so instead of printing "0
+    // behind", which reads like a deficit.
+    const gapLine = (!mine || !leader) ? ''
+      : mine.rank === 1
+        ? `<div class="sub">leading by ${num(leader.blocks - (rows[1]?.blocks ?? leader.blocks))} block(s)</div>`
+        : `<div class="sub">${num(leader.blocks - mine.blocks)} block(s) behind the leader</div>`
+
+    cards.push(`<section class="wide" style="--c: var(--c-peers)">
+      <h2><span class="ico" aria-hidden="true">🏁</span>Producer standings</h2>
+      ${mine
+        ? `<div class="big">#${num(mine.rank)} <span style="font-size:14px;color:var(--muted)">of ${num(pb.producers)}</span></div>
+           ${gapLine}`
+        : `<div class="big sub" style="font-size:16px">not seen yet</div>
+           <div class="sub">this node has not signed a block in the ${num(pb.scannedBlocks)} scanned</div>`}
+      ${pb.error ? `<div class="err" style="margin-top:8px">${esc(pb.error)}</div>` : ''}
+      <div class="board-wrap">
+        <table class="board">
+          <thead><tr><th>#</th><th>Producer</th><th></th><th>Blocks</th><th>Share</th></tr></thead>
+          <tbody>
+            ${rows.map((r) => tr_(r)).join('')}
+            ${outside ? tr_(outside, 'gap ') : ''}
+          </tbody>
+        </table>
+      </div>
+      <div class="sub" style="margin-top:8px">
+        ${num(pb.scannedBlocks)} blocks sampled${pb.scannedFrom !== undefined ? ` (#${num(pb.scannedFrom)}–#${num(pb.scannedTo)})` : ''}${pb.since ? ` · since ${new Date(pb.since).toLocaleDateString()}` : ''}.
+        Totals persist across restarts.
+      </div>
+      ${pb.multiSigner ? `<div class="sub">Some blocks carry more than one signer, so the share column can total over 100%.</div>` : ''}
+      ${(pb.labels?.rejected ?? []).map((x) => `<div class="sub warn">DASH_PEER_LABELS: ${esc(x)}</div>`).join('')}
+      ${(pb.labels?.ambiguous ?? []).map((x) => `<div class="sub warn">Label “${esc(x.name)}” (${esc(x.key)}) ${
+        x.clash ? `collides with “${esc(x.clash)}” on the same address` : `matches ${num(x.matches)} producers — left unlabelled rather than guessed`}</div>`).join('')}
+      ${(pb.labels?.unmatched ?? []).map((x) => `<div class="sub">Label “${esc(x.name)}” (${esc(x.key)}) matches no producer in this sample yet.</div>`).join('')}
+      ${dv.productionBehind ? `<div class="sub warn">${num(dv.productionBehind)} block(s) still to catch up on.</div>` : ''}
+    </section>`)
+  }
+
+  // Log tail, newest first. The interesting line is always the most recent one,
+  // and a panel that opens scrolled to the oldest line makes the reader scroll
+  // past forty lines of history to reach it.
+  if (d.node?.recentLog?.length) {
+    cards.push(`<section class="wide" style="--c: var(--c-log)">
+      <h2><span class="ico" aria-hidden="true">📜</span>Producer log — newest first (${d.node.recentLog.length} lines)</h2>
+      <pre class="log">${esc([...d.node.recentLog].reverse().join('\n'))}</pre>
+      <div class="logfoot">Most recent at the top. Collected ${d.node.ageSeconds ?? '?'}s ago.</div>
+    </section>`)
+  }
+
+  $('grid').innerHTML = cards.join('')
+  $('foot').innerHTML = (d.problems?.length
+    ? `<ul class="problems">${d.problems.map((p) => `<li>${esc(p)}</li>`).join('')}</ul>`
+    : '')
+    + `<div style="margin-top:8px">updated ${new Date(d.generatedAt).toLocaleTimeString()} · dashboard up since ${new Date(d.dashboardStartedAt).toLocaleString()} · <a href="/api/status${location.search}">JSON</a></div>`
+    // Said plainly, on every page, rather than left to be inferred. Someone
+    // shown a screenshot of this should not come away thinking XYO shipped it.
+    + `<div class="whose">
+         <span class="who">🛠️ Built by LewSales</span>
+         <span class="sep">·</span>
+         <span>Independent community project — <strong>not affiliated with, endorsed by, or supported by XYO Network</strong>.</span>
+         <span class="sep">·</span>
+         <a href="https://github.com/LewSales/xl1-block-producer-pi" target="_blank" rel="noopener noreferrer">source &amp; issues ↗</a>
+       </div>`
+}
+
+async function tick() {
+  try {
+    const res = await fetch(`/api/status${location.search}`, { cache: 'no-store' })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    render(await res.json())
+  } catch (e) {
+    $('overall').textContent = 'dashboard unreachable'
+    $('overall').className = 'pill down'
+    $('foot').textContent = String(e)
+  }
+}
+tick()
+setInterval(tick, 5000)
+</script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+# Real operator config. Only the .template files belong in git.
+*.env
+!*.env.template
+
+# Fetched at setup time, not vendored.
+upstream/
+
+# Runtime state and backups.
+state/
+data/
+*.zip
+*.tar.gz
+
+# Stubbed SDK the test runner installs and removes.
+dashboard/node_modules/

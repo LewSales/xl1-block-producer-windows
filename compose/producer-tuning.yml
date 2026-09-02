@@ -1,0 +1,29 @@
+# Shadows one file in the image's presets tree: roles/producer.json.
+#
+# The image ships blockProductionCheckInterval: 60000, six times the xl1-cli
+# code default of 10000. Every tick reads the head and the mempool, so that one
+# number decides how quickly the node notices a new head at all — and blocks on
+# sequence arrive every ~53s. At 60000 the node learns of a head ~26s after it
+# exists and builds candidates for heights another producer claimed half a
+# minute earlier. Measured on the Pi it was the whole gate: 0.5-2% of the chain
+# at 60000, 13.6% at 5000.
+#
+# 5000 is not an aggressive value. It is MIN_POLL_INTERVAL_MS in upstream's own
+# FinalizedBlockStream — the floor XYO enforces on itself — so this sits inside
+# the rate they sanction rather than beyond it. Below 5000 there is no
+# defensible ground.
+#
+# Every other field must match the image's own producer.json. This shadows the
+# whole file, not the one key, so a field left out here is a field the producer
+# loses: drop providerBindings and the viewers rebind to a local store and the
+# node quietly forks a private chain.
+#
+# Used as a second -f alongside upstream/compose/node.yml. The mount is given as
+# an absolute path through XL1_PRODUCER_PRESET because compose resolves relative
+# volume paths against the FIRST compose file's directory (upstream\compose),
+# not against the override that declares them — a relative path here would to
+# the wrong place in a way that fails silently.
+services:
+  preset:
+    volumes:
+      - ${XL1_PRODUCER_PRESET:?XL1_PRODUCER_PRESET must be set — xl1ctl.ps1 sets it}:/opt/xl1/presets/roles/producer.json:ro

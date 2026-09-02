@@ -1,0 +1,48 @@
+# The dashboard, alongside a producer this file deliberately does not define.
+#
+# The producer is run by upstream's own compose:
+#
+#   docker compose -f upstream/compose/node.yml --profile preset up -d preset
+#
+# Reproducing their service here would mean maintaining a copy of something
+# XYO changes — and their file carries a warning that is easy to get wrong:
+# a federated producer must NOT be given a local store or a data volume, or the
+# viewers rebind to that store and the node forks its own private chain.
+#
+# The two stacks are joined by nothing but a published port. Upstream publishes
+# the health port to Windows; Docker Desktop resolves host.docker.internal from
+# inside a container, so that is the whole integration.
+
+name: xl1-dashboard
+
+services:
+  dashboard:
+    image: xl1-dashboard:local
+    container_name: xl1-dashboard
+    restart: unless-stopped
+    env_file: [config/dashboard.env]
+    environment:
+      # Not 127.0.0.1: inside a container that is the container. Docker Desktop
+      # maps host.docker.internal to Windows.
+      XL1_HEALTH_URL: http://host.docker.internal:9099
+      XL1_STATUS_FILE: /var/lib/xl1/producer-status.json
+      DASH_TREND_FILE: /var/lib/xl1/dashboard/trend.jsonl
+      # Producer standings, tallied by the same chain scan that counts this
+      # node's own blocks. Written whole then renamed, so it lands in the bind
+      # mount below rather than the read-only layer.
+      DASH_PEERS_FILE: /var/lib/xl1/dashboard/peers.json
+      DASH_DISK_PATH: /var/lib/xl1
+    ports:
+      - "127.0.0.1:8088:8088"
+    volumes:
+      # Written by scripts/xl1-collect.ps1 on the Windows side. The dashboard
+      # never gets the Docker socket — the same reasoning as on the Pi, and it
+      # matters more here, where the socket is a Windows-wide root equivalent.
+      - ./state:/var/lib/xl1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    read_only: true
+    tmpfs: [/tmp]
+    logging:
+      driver: json-file
+      options: { max-size: "5m", max-file: "2" }

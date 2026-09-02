@@ -1,0 +1,217 @@
+﻿<#
+.SYNOPSIS
+  Day-to-day control for the XL1 producer on Windows.
+
+.DESCRIPTION
+  The producer itself is run by upstream's compose (upstream/compose/node.yml,
+  preset profile). This drives that plus the dashboard, so an operator has one
+  command rather than two compose files to remember.
+
+.EXAMPLE
+  .\xl1ctl.ps1 status
+  .\xl1ctl.ps1 logs -Follow
+  .\xl1ctl.ps1 doctor
+#>
+[CmdletBinding()]
+param(
+  [Parameter(Position = 0)]
+  [ValidateSet('status', 'start', 'stop', 'restart', 'logs', 'addr', 'doctor', 'dashboard', 'backup')]
+  [string]$Command = 'status',
+  [switch]$Follow,
+  [int]$Lines = 60
+)
+
+$ErrorActionPreference = 'Stop'
+$Root        = Split-Path -Parent $PSScriptRoot
+$Upstream    = Join-Path $Root 'upstream\compose\node.yml'
+$Tuning      = Join-Path $Root 'compose\producer-tuning.yml'
+$Preset      = Join-Path $Root 'presets\roles\producer.json'
+$DashCompose = Join-Path $Root 'dashboard.yml'
+$ProducerEnv = Join-Path $Root 'config\sequence-producer.env'
+$Api         = 'http://127.0.0.1:8088/api/status'
+
+function Say  { param($m, $c = 'Gray') Write-Host "  $m" -ForegroundColor $c }
+function Head { param($m) Write-Host ''; Write-Host $m -ForegroundColor White }
+
+function Assert-Docker {
+  if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+    throw 'docker not found. Install Docker Desktop, then re-run.'
+  }
+  & docker info 2>&1 | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw 'Docker is installed but not responding. Is Docker Desktop running?' }
+}
+
+function Start-Producer {
+  # XL1_PRESET_ENV_FILE is resolved relative to the compose file, not the shell.
+  $env:XL1_IMAGE = 'xl1:local'
+  $env:XL1_PRESET_ENV_FILE = '../../config/sequence-producer.env'
+  # ...but a volume path is resolved against the FIRST -f file's directory,
+  # which is upstream\compose, not the override that declares it. Absolute,
+  # so the mount cannot land somewhere else without saying so.
+  $env:XL1_PRODUCER_PRESET = $Preset
+  if (-not (Test-Path $Preset)) { throw "producer preset missing: $Preset" }
+  & docker compose -f $Upstream -f $Tuning --profile preset up -d preset
+}
+
+function Get-Snapshot {
+  try { Invoke-RestMethod -Uri $Api -TimeoutSec 6 } catch { $null }
+}
+
+function Get-ProducerContainer {
+  $n = (& docker ps -a --filter 'name=preset' --format '{{.Names}}' | Select-Object -First 1)
+  if ($n) { return $n }
+  return 'xl1-node-preset-1'
+}
+
+switch ($Command) {
+
+  'start' {
+    Assert-Docker
+    if (-not (Test-Path $ProducerEnv)) { throw "$ProducerEnv is missing. Copy the template in config\ and fill it in." }
+    Head 'Starting'
+    Start-Producer
+    & docker compose -f $DashCompose up -d
+    Say 'producer and dashboard started' 'Green'
+    Say 'dashboard: http://127.0.0.1:8088'
+  }
+
+  'stop' {
+    Assert-Docker
+    Head 'Stopping'
+    $env:XL1_IMAGE = 'xl1:local'
+    $env:XL1_PRESET_ENV_FILE = '../../config/sequence-producer.env'
+    $env:XL1_PRODUCER_PRESET = $Preset
+    & docker compose -f $Upstream -f $Tuning --profile preset stop preset
+    & docker compose -f $DashCompose stop
+    Say 'stopped' 'Green'
+  }
+
+  'restart' {
+    Assert-Docker
+    Head 'Restarting'
+    Start-Producer
+    & docker compose -f $DashCompose restart
+    Say 'restarted' 'Green'
+  }
+
+  'logs' {
+    Assert-Docker
+    $c = Get-ProducerContainer
+    if ($Follow) { & docker logs -f --tail $Lines $c } else { & docker logs --tail $Lines $c }
+  }
+
+  'dashboard' {
+    Head 'Dashboard'
+    Say 'http://127.0.0.1:8088'
+    Start-Process 'http://127.0.0.1:8088'
+  }
+
+  'addr' {
+    # The signing address is derived from the mnemonic and is the one that must
+    # be authorised on the network. Nothing else in the running system shows it.
+    Assert-Docker
+    Head 'Addresses'
+    $s = Get-Snapshot
+    if ($s -and $s.chain.balances.producer) {
+      Say ('signs as  {0}' -f $s.chain.balances.producer.address) 'Green'
+    }
+    if ($s -and $s.chain.balances.reward) {
+      Say ('rewards   {0}' -f $s.chain.balances.reward.address)
+      Say ('balance   {0} XL1' -f $s.chain.balances.reward.xl1) 'Green'
+    }
+    if (-not $s) { Say 'dashboard API not responding; cannot resolve addresses' 'Yellow' }
+  }
+
+  'backup' {
+    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $dest  = Join-Path $Root ('xl1-backup-' + $stamp + '.zip')
+    Head 'Backup'
+    Say 'This archives config\, which contains your seed phrase.' 'Yellow'
+    Say 'It is NOT encrypted. Store it where you would store a password.' 'Yellow'
+    Compress-Archive -Path (Join-Path $Root 'config\*') -DestinationPath $dest -Force
+    Say ('written to ' + $dest) 'Green'
+  }
+
+  'doctor' {
+    Head 'Diagnosis'
+    $issues = 0
+
+    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+      Say 'FAIL  docker not installed' 'Red'; $issues++
+    }
+    else {
+      & docker info 2>&1 | Out-Null
+      if ($LASTEXITCODE -ne 0) { Say 'FAIL  Docker Desktop is not running' 'Red'; $issues++ }
+      else { Say 'ok    Docker responding' 'Green' }
+    }
+
+    if (-not (Test-Path $Upstream)) {
+      Say 'FAIL  upstream\ is missing. Run Setup.ps1 to fetch xl1-docker-images.' 'Red'; $issues++
+    } else { Say 'ok    upstream compose present' 'Green' }
+
+    if (-not (Test-Path $ProducerEnv)) {
+      Say 'FAIL  config\sequence-producer.env missing' 'Red'; $issues++
+    }
+    elseif (-not (Select-String -Path $ProducerEnv -Pattern '^XL1_MNEMONIC=\s*[A-Za-z]' -Quiet)) {
+      Say 'FAIL  no mnemonic set -- the producer cannot sign' 'Red'; $issues++
+    }
+    else { Say 'ok    credentials present' 'Green' }
+
+    $stray = Join-Path $Root 'sequence-producer.env'
+    if ((Test-Path $stray) -and ((Get-FileHash $stray).Hash -ne (Get-FileHash $ProducerEnv).Hash)) {
+      Say 'FAIL  sequence-producer.env in the project root differs from config\ -- only config\ is read' 'Red'
+      $issues++
+    }
+
+    $snap = Join-Path $Root 'state\producer-status.json'
+    if (-not (Test-Path $snap)) {
+      Say 'FAIL  collector has never run. Is the scheduled task installed?' 'Red'; $issues++
+    }
+    else {
+      $age = [int]((Get-Date) - (Get-Item $snap).LastWriteTime).TotalSeconds
+      if ($age -gt 120) { Say ('FAIL  collector snapshot is ' + $age + 's old') 'Red'; $issues++ }
+      else { Say ('ok    collector fresh (' + $age + 's)') 'Green' }
+    }
+
+    $s = Get-Snapshot
+    if (-not $s) { Say 'FAIL  dashboard API not responding' 'Red'; $issues++ }
+    else {
+      Say 'ok    dashboard responding' 'Green'
+      if ($s.node.eligibility.blocked -and -not $s.node.eligibilityIgnored) {
+        Say ('FAIL  producer ineligible: ' + $s.node.eligibility.reason) 'Red'; $issues++
+      }
+      foreach ($p in $s.problems) { Say ('warn  ' + $p) 'Yellow' }
+    }
+
+    Write-Host ''
+    if ($issues -eq 0) { Say 'nothing obviously wrong' 'Green' } else { Say ($issues.ToString() + ' problem(s) found') 'Red' }
+    exit $(if ($issues -gt 0) { 1 } else { 0 })
+  }
+
+  default {
+    Assert-Docker
+    Head 'Containers'
+    & docker ps --filter 'name=preset' --filter 'name=xl1-dashboard' --format 'table {{.Names}}\t{{.Status}}'
+
+    $s = Get-Snapshot
+    if (-not $s) { Say 'dashboard API not responding (it may still be starting)' 'Yellow'; break }
+
+    Head 'Producer'
+    Say ('state      ' + $s.status) $(if ($s.status -eq 'ok') { 'Green' } else { 'Yellow' })
+    foreach ($p in $s.problems) { Say ('  - ' + $p) 'Yellow' }
+
+    Head 'Chain'
+    Say ('block      ' + $s.chain.currentBlock + '   finalized ' + $s.chain.finalizedBlock + '   lag ' + $s.chain.finalizationLag)
+    if ($s.derived.secondsPerBlock) { Say ('rate       ' + $s.derived.secondsPerBlock + 's/block') }
+    Say ('submitted  ' + $s.node.blocksPublished)
+    if ($s.derived.lastBlock) {
+      Say ('last block #' + $s.derived.lastBlock + '  (' + $s.derived.blocksSinceLast + ' blocks ago)') 'Green'
+    }
+    else { Say 'last block none landed yet' 'Yellow' }
+
+    if ($s.chain.balances.reward) {
+      Head 'Rewards'
+      Say ('balance    ' + $s.chain.balances.reward.xl1 + ' XL1') 'Green'
+    }
+  }
+}
