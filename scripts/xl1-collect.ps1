@@ -21,6 +21,7 @@ param(
   [string]$StateDir  = '',
   [string]$Container = '',
   [int]$HealthPort = 9099,
+  [int]$RaceWindow = 3600,
   [int]$LogLines     = 40,
   [string]$EligibilityWindow = '20m'
 )
@@ -186,6 +187,58 @@ try {
   # as 'instant', which is the one wrong answer available.
 }
 $doc.errorCount = @($newLog | Select-String -Pattern '\b(error|fatal|unhandled|exception)\b').Count
+
+# ------------------------------------------------------------ candidate race
+#
+# Why candidates lose, counted from the slice this run already read. $newLog is
+# everything since the last cursor, so the counters accumulate 30 seconds at a
+# time into a rolling window rather than re-reading an hour of log every run.
+#
+# The anchor line matters. behind-finalized-head and block-number-mismatch are
+# each logged twice — once by the validation viewer, once by the runner — while
+# tx-already-finalized is logged once. Counting the bracketed tag would report
+# 52 losses where 26 happened. "No candidate block can be appended" is emitted
+# exactly once per rejected candidate and carries the tag.
+#
+# Wins are NOT counted here. "Published block" means submitted, not accepted;
+# the dashboard takes wins from the chain scan instead.
+$anchors = @($newLog | Select-String -Pattern 'No candidate block can be appended' -SimpleMatch)
+# .Contains, not -like: a tag in square brackets is a wildcard character class.
+function Measure-Reason([string]$tag) { @($anchors | Where-Object { $_.Line.Contains("[$tag]") }).Count }
+
+$rBuilt = @($newLog | Select-String -Pattern 'Building block \d+$').Count
+$rRetry = @($newLog | Select-String -Pattern '(retry' -SimpleMatch).Count
+$rTxFin = Measure-Reason 'tx-already-finalized'
+$rBehind = Measure-Reason 'behind-finalized-head'
+$rMismatch = Measure-Reason 'block-number-mismatch'
+
+$raceFile = Join-Path $StateDir '.race-buckets'
+$nowEpoch = [int][double]::Parse((Get-Date -UFormat %s))
+Add-Content -Path $raceFile -Value "$nowEpoch $rBuilt $rRetry $rTxFin $rBehind $rMismatch"
+
+$cutoff = $nowEpoch - $RaceWindow
+$kept = @()
+foreach ($line in (Get-Content $raceFile -ErrorAction SilentlyContinue)) {
+  $f = $line -split ' '
+  if ($f.Count -eq 6 -and [int]$f[0] -ge $cutoff) { $kept += ,$f }
+}
+if ($kept.Count -gt 0) {
+  # Rewritten whole then moved, so a kill mid-write cannot leave a half-line
+  # that poisons every later sum.
+  Set-Content -Path "$raceFile.tmp" -Value ($kept | ForEach-Object { $_ -join ' ' })
+  Move-Item -Path "$raceFile.tmp" -Destination $raceFile -Force
+  $doc.race = [ordered]@{
+    windowSeconds   = $RaceWindow
+    observedSeconds = $nowEpoch - [int]$kept[0][0]
+    built           = ($kept | ForEach-Object { [int]$_[1] } | Measure-Object -Sum).Sum
+    retries         = ($kept | ForEach-Object { [int]$_[2] } | Measure-Object -Sum).Sum
+    lost            = [ordered]@{
+      txAlreadyFinalized  = ($kept | ForEach-Object { [int]$_[3] } | Measure-Object -Sum).Sum
+      behindFinalizedHead = ($kept | ForEach-Object { [int]$_[4] } | Measure-Object -Sum).Sum
+      blockNumberMismatch = ($kept | ForEach-Object { [int]$_[5] } | Measure-Object -Sum).Sum
+    }
+  }
+}
 
 $lastPub = Join-Path $StateDir '.last-published'
 if ($published.Count -gt 0) {
