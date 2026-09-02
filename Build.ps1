@@ -79,7 +79,14 @@ if (-not $ProducerOnly) {
   if (-not (Test-Path (Join-Path $Dash 'server.mjs'))) {
     Die "dashboard\ is missing. Run Setup.ps1 -- it fetches the shared dashboard source."
   }
-  & docker build --platform $Platform -t xl1-dashboard:local $Dash
+  # Stamp the build so the running page can identify itself. --dirty matters:
+  # a dashboard built from uncommitted edits must not claim to be the commit it
+  # was branched from, or a deploy that shipped something else looks identical
+  # to one that did not.
+  $commit = (git -C $Root describe --always --dirty --abbrev=8 2>$null)
+  if (-not $commit) { $commit = 'unknown' }
+  $builtAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+  & docker build --platform $Platform --build-arg "DASH_COMMIT=$commit" --build-arg "DASH_BUILT_AT=$builtAt" -t xl1-dashboard:local $Dash
   if ($LASTEXITCODE -ne 0) { Die 'dashboard image build failed' }
 
   # A 100 MB image that throws on startup is caught here or by an operator.
