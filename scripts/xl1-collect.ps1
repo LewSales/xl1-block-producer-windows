@@ -180,6 +180,19 @@ try {
       samples        = $hf.count
     }
     if ($null -ne $cyc) { $lat.cycleP50Ms = $cyc.p50Ms; $lat.cycleP95Ms = $cyc.p95Ms }
+    # Where a cycle's time goes, out of the same payload already fetched. These
+    # stages NEST — a cycle contains the head fetch and the build, the build
+    # contains the mempool calls — so the dashboard shows them as durations, not
+    # as a waterfall that sums to the cycle.
+    $stages = [ordered]@{}
+    foreach ($pair in @(@('headFetch', $statz.timings.headFetch),
+                        @('blockProduction', $statz.timings.blockProduction),
+                        @('mempoolTx', $statz.timings.mempoolPendingTransactionsFetch),
+                        @('mempoolBlocks', $statz.timings.mempoolPendingBlocksFetch),
+                        @('submit', $statz.timings.mempoolSubmitBlock))) {
+      if ($null -ne $pair[1] -and $null -ne $pair[1].p50Ms) { $stages[$pair[0]] = $pair[1].p50Ms }
+    }
+    if ($stages.Count -gt 0) { $lat.stages = $stages }
     $doc.latency = $lat
   }
 } catch {
