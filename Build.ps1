@@ -83,7 +83,11 @@ if (-not $ProducerOnly) {
   # a dashboard built from uncommitted edits must not claim to be the commit it
   # was branched from, or a deploy that shipped something else looks identical
   # to one that did not.
-  $commit = (git -C $Root describe --always --dirty --abbrev=8 2>$null)
+  # Bare short sha, not `git describe`: describe prefers the nearest tag and
+  # yields something GitHub cannot resolve as a commit, breaking the dashboard's
+  # own "read the code" link the moment a release is tagged.
+  $commit = (git -C $Root rev-parse --short=8 HEAD 2>$null)
+  if ($commit) { git -C $Root diff --quiet 2>$null; if ($LASTEXITCODE -ne 0) { $commit = "$commit-dirty" } }
   if (-not $commit) { $commit = 'unknown' }
   $builtAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
   & docker build --platform $Platform --build-arg "DASH_COMMIT=$commit" --build-arg "DASH_BUILT_AT=$builtAt" -t xl1-dashboard:local $Dash
