@@ -12,9 +12,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-// fileURLToPath, not .pathname: on Windows the latter yields /C:/... and every
-// join below then builds C:\C:\... . The same suite runs in the Pi bundle and
-// in the Windows one, so it has to resolve its own directory on both.
+// fileURLToPath, not .pathname: under Windows-native node the latter yields
+// /C:/... and every join below then builds C:\C:\... . This repo is worked on
+// from Windows, so the suite has to find its own directory whether node runs
+// under WSL or natively.
 const here = fileURLToPath(new URL('.', import.meta.url))
 const fixture = (n) => readFile(join(here, 'fixtures', n), 'utf8')
 
@@ -34,6 +35,9 @@ process.env.DASH_PEER_LABELS ??= [
   '33=TooShort',
   'nothex01=NotHex',
 ].join(',')
+// Day bucketing is read at import. Pinned to UTC so the window assertions below
+// mean the same thing on a laptop in Denver and in CI.
+process.env.DASH_DAY_TZ ??= 'UTC'
 const m = await import('../dashboard/server.mjs')
 
 // ---------------------------------------------------------------- pure logic
@@ -234,15 +238,19 @@ const PEER_B = '2222222222222222222222222222222222222222'
 
 function resetScan() {
   m.peers.clear()
+  m.days.clear()
   Object.assign(m.production, {
     counted: 0, lastBlock: undefined, scannedFrom: undefined, scannedTo: undefined,
     scanned: 0, multiSigner: false, error: undefined, behind: undefined, cursor: undefined,
+    daysFrom: undefined, daysError: undefined, undated: undefined,
   })
 }
 
+const DAY = 86_400_000
+
 /** A viewer whose chain is a plain map of block number → signer addresses.
  *  Records every call so the walk itself can be asserted, not just its result. */
-function fakeViewer(signersByBlock, { emptyFor } = {}) {
+function fakeViewer(signersByBlock, { emptyFor, epochFor } = {}) {
   const calls = []
   return {
     calls,
@@ -255,7 +263,13 @@ function fakeViewer(signersByBlock, { emptyFor } = {}) {
         const out = []
         for (let n = top; n > top - limit; n--) {
           const signers = signersByBlock[n]
-          if (signers) out.push({ block: n, addresses: signers })
+          if (!signers) continue
+          // No epochFor means no $epoch on the block at all, which is the
+          // undated case the older tests here already exercise by accident.
+          const epoch = epochFor?.(n)
+          out.push(epoch === undefined
+            ? { block: n, addresses: signers }
+            : { block: n, addresses: signers, $epoch: epoch })
         }
         return out
       },
@@ -485,4 +499,163 @@ test('days recorded before the chain counter existed still read from the old key
     { t: day + 2000, blocks: 9, reward: 0 },
   ])
   assert.equal(out[0].blocks, 4)
+})
+
+// ------------------------------------------------------- day windows
+//
+// The totals answer "who has produced most since this dashboard started", which
+// says nothing useful about a node that was offline for two of those days. These
+// guard the split, and in particular the two ways it could lie: filing a block
+// under the day it was read rather than the day it was made, and letting a
+// backfill add blocks to totals that already contain them.
+
+test('a block is filed under its own day, not the day it was read', async () => {
+  resetScan()
+  const now = Date.now()
+  // Read in one pass, moments apart, but three days separate the blocks.
+  const chain = { 1: [PEER_A], 2: [PEER_A], 3: [SELF] }
+  const epochs = { 1: now - 3 * DAY, 2: now - 3 * DAY, 3: now }
+  m.production.cursor = 0
+  await m.scanProduction(fakeViewer(chain, { epochFor: (n) => epochs[n] }), 3)
+
+  assert.equal(m.days.size, 2, 'two distinct days, not one bucket for the read')
+  const today = m.days.get(m.dayKey(now))
+  assert.equal(today.scanned, 1)
+  assert.equal(today.counts.get(SELF), 1)
+  assert.equal(m.days.get(m.dayKey(now - 3 * DAY)).counts.get(PEER_A), 2)
+})
+
+test('a window ranks on its own blocks while the total keeps its own order', async () => {
+  resetScan()
+  const now = Date.now()
+  // PEER_A built a lead a week ago and has done nothing today; we are the only
+  // one producing today. The total and today's table must disagree, and both
+  // must be right.
+  const chain = {}
+  const epochs = {}
+  for (let n = 1; n <= 10; n++) { chain[n] = [PEER_A]; epochs[n] = now - 6 * DAY }
+  for (let n = 11; n <= 13; n++) { chain[n] = [SELF]; epochs[n] = now }
+  m.production.cursor = 0
+  await m.scanProduction(fakeViewer(chain, { epochFor: (n) => epochs[n] }), 13)
+
+  const board = m.peerBoard()
+  assert.equal(board.top[0].address, PEER_A, 'PEER_A still leads overall')
+  assert.equal(board.self.rank, 2)
+
+  const today = board.windows.today
+  assert.equal(today.self.rank, 1, 'today we lead')
+  assert.equal(today.self.blocks, 3)
+  assert.equal(today.scannedBlocks, 3, 'the window divides by its own blocks')
+  assert.equal(today.producers, 1, 'a producer with no blocks today is not in today')
+
+  // The gap an operator is actually reading off the page: behind overall,
+  // ahead today, from the same scan.
+  assert.equal(board.top[0].vsSelf, 7, 'PEER_A is 7 blocks up overall')
+  assert.equal(board.windows.week.blocksByAddress[PEER_A], 10)
+  assert.equal(board.windows.week.blocksByAddress[SELF], 3)
+})
+
+test('a block with no timestamp is counted once, in the totals only', async () => {
+  resetScan()
+  const now = Date.now()
+  const chain = { 1: [PEER_A], 2: [PEER_A] }
+  // Only block 1 carries $epoch.
+  m.production.cursor = 0
+  await m.scanProduction(fakeViewer(chain, { epochFor: (n) => (n === 1 ? now : undefined) }), 2)
+
+  assert.equal(m.peers.get(PEER_A), 2, 'both blocks are in the total')
+  assert.equal(m.production.undated, 1, 'the undated one is reported, not dropped')
+  assert.equal(m.peerBoard().windows.today.blocksByAddress[PEER_A], 1)
+})
+
+test('backfilling day history does not add to totals that already hold it', async () => {
+  resetScan()
+  const now = Date.now()
+  const chain = {}
+  const epochs = {}
+  for (let n = 1; n <= 60; n++) { chain[n] = [PEER_A]; epochs[n] = now - DAY }
+  const v = fakeViewer(chain, { epochFor: (n) => epochs[n] })
+
+  // The whole range is counted in the totals first.
+  m.production.cursor = 0
+  await m.scanProduction(v, 60)
+  const total = m.peers.get(PEER_A)
+  const scanned = m.production.scanned
+  assert.equal(total, 60)
+
+  // Now stand in for a v1 file: totals intact, no day history, nothing bucketed.
+  m.days.clear()
+  m.production.daysFrom = 61
+
+  await m.backfillDays(v)
+
+  assert.equal(m.peers.get(PEER_A), total, 'the total must not move')
+  assert.equal(m.production.scanned, scanned, 'nor the denominator')
+  assert.equal(m.days.get(m.dayKey(now - DAY)).counts.get(PEER_A), 60,
+    'but the day now holds every one of those blocks')
+  assert.equal(m.production.daysFrom, 1)
+  assert.equal(m.peerBoard().daysComplete, true)
+})
+
+test('an unfinished backfill is stated rather than shown as a quiet week', async () => {
+  resetScan()
+  m.production.scannedFrom = 1
+  m.production.daysFrom = 500
+  assert.equal(m.peerBoard().daysComplete, false)
+})
+
+test('day buckets are pruned to the retention limit', async () => {
+  resetScan()
+  const now = Date.now()
+  const chain = {}
+  const epochs = {}
+  // 40 days, one block each, against a 35-day default.
+  for (let n = 1; n <= 40; n++) { chain[n] = [PEER_A]; epochs[n] = now - (40 - n) * DAY }
+  m.production.cursor = 0
+  await m.scanProduction(fakeViewer(chain, { epochFor: (n) => epochs[n] }), 40)
+
+  assert.equal(m.days.size, 35, 'older days are dropped')
+  assert.ok(m.days.has(m.dayKey(now)), 'today survives')
+  assert.ok(!m.days.has(m.dayKey(now - 39 * DAY)), 'the oldest does not')
+  assert.equal(m.peers.get(PEER_A), 40, 'pruning history does not touch the totals')
+})
+
+// ------------------------------------------------------------------ latency
+//
+// The split between wire and local is the whole value of this panel: one
+// round-trip number cannot tell an operator whether the gateway is slow or
+// their own box is. These pin the arithmetic and the absence case.
+
+test('latency separates the wire floor from local work', () => {
+  // state.node is assigned the way loadSnapshot does it: STATUS_FILE is captured
+  // at import, so driving pollNode from a temp file would read the fixture path
+  // instead and quietly assert nothing.
+  m.state.node = {
+    ok: true,
+    container: { name: 'xl1-producer', state: 'running', running: true },
+    latency: {
+      headFetchMinMs: 103, headFetchP50Ms: 238, headFetchP95Ms: 386,
+      samples: 13398, cycleP50Ms: 508, cycleP95Ms: 2309,
+    },
+  }
+
+  const l = m.derived().latency
+  assert.equal(l.wireFloorMs, 103)
+  assert.equal(l.typicalMs, 238)
+  // 238 typical against a 103 floor is 135ms this machine spends parsing and
+  // validating — the number that says the box is slow rather than the network.
+  assert.equal(l.localMs, 135)
+  assert.equal(l.p95Ms, 386)
+  assert.equal(l.samples, 13398)
+  assert.equal(l.cycleP95Ms, 2309)
+})
+
+test('a producer that reported no timings shows no latency panel at all', () => {
+  // An older collector, or a status server that did not answer. Reporting zero
+  // here would read as "instant" — the one wrong answer available.
+  m.state.node = {
+    ok: true,
+    container: { name: 'xl1-producer', state: 'running', running: true },
+  }
+  assert.equal(m.derived().latency, undefined)
 })

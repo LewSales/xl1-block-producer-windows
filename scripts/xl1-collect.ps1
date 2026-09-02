@@ -20,6 +20,7 @@
 param(
   [string]$StateDir  = '',
   [string]$Container = '',
+  [int]$HealthPort = 9099,
   [int]$LogLines     = 40,
   [string]$EligibilityWindow = '20m'
 )
@@ -151,6 +152,39 @@ $total += $published.Count
 Set-Content -Path $counterFile -Value $total -NoNewline
 
 $doc.blocksPublished = $total
+
+# ---------------------------------------------------------------- latency
+#
+# The producer already measures this. ProducerActor times every stage and the
+# status server serves the snapshot on the health port, so this costs one
+# request to 127.0.0.1 against in-memory counters — no chain RPC, no work the
+# node was not already doing. A dashboard that pinged the gateway itself would
+# add load to the shared endpoint this node competes on, to re-derive a number
+# the node had already measured on the path that matters.
+#
+# headFetch runs on every check: its min is the wire floor to the gateway, its
+# p50 includes the local parsing and validation on top. The two together are
+# what separate a slow network from a slow box.
+try {
+  $statz = Invoke-RestMethod -Uri "http://127.0.0.1:$HealthPort/statz" -TimeoutSec 2
+  $hf = $statz.timings.headFetch
+  $cyc = $statz.timings.productionCycle
+  if ($null -ne $hf -and $null -ne $hf.p50Ms) {
+    # Every field or none: a partial object leaves the page deciding what a
+    # missing percentile means.
+    $lat = [ordered]@{
+      headFetchMinMs = $hf.minMs
+      headFetchP50Ms = $hf.p50Ms
+      headFetchP95Ms = $hf.p95Ms
+      samples        = $hf.count
+    }
+    if ($null -ne $cyc) { $lat.cycleP50Ms = $cyc.p50Ms; $lat.cycleP95Ms = $cyc.p95Ms }
+    $doc.latency = $lat
+  }
+} catch {
+  # A wedged or absent status server omits the field. Reporting zero would read
+  # as 'instant', which is the one wrong answer available.
+}
 $doc.errorCount = @($newLog | Select-String -Pattern '\b(error|fatal|unhandled|exception)\b').Count
 
 $lastPub = Join-Path $StateDir '.last-published'
