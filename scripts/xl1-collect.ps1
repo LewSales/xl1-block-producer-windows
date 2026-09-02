@@ -193,6 +193,12 @@ try {
       if ($null -ne $pair[1] -and $null -ne $pair[1].p50Ms) { $stages[$pair[0]] = $pair[1].p50Ms }
     }
     if ($stages.Count -gt 0) { $lat.stages = $stages }
+    # Whether the node is keeping up, which is what decides whether a slow cycle
+    # is a fault or just a characteristic. Same payload, no extra request.
+    if ($null -ne $statz.counts) {
+      $lat.skippedChecks = $statz.counts.concurrentChecksSkipped
+      $lat.rejectedPublishes = $statz.counts.rejectedPublishes
+    }
     $doc.latency = $lat
   }
 } catch {
