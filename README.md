@@ -190,3 +190,46 @@ address, which is the one that has to be on the list.
 
 The producer receives **10% of the block reward**; the remainder funds the Step
 Rewards Pool.
+
+## Why this node wins fewer blocks than a Raspberry Pi
+
+Because of how it reaches the internet, not because of the machine.
+
+Measured 2026-09-02 against the same endpoint, from both nodes, as pure TCP
+connect time — no TLS, no HTTP, no application:
+
+| path | min | p50 | **p95** | max |
+|---|---|---|---|---|
+| Pi, Ethernet through the router | 40 ms | 54 ms | **59 ms** | 141 ms |
+| This laptop, Wi-Fi to a phone hotspot | 55 ms | 71 ms | **162 ms** | 203 ms |
+
+The median is only 1.3x worse. The p95 is 2.7x worse, and the p95 is what a
+block race charges you for: a producing cycle makes several sequential RPC calls
+and every one of them rolls the dice on that tail. It shows up downstream as a
+`productionCycle` p95 near 8 seconds against the Pi's 2.4, and as 85-95% of lost
+candidates reporting `head advanced first`. The node is not failing. It is late.
+
+Put the laptop on the router — Ethernet, or the house Wi-Fi at minimum. Watch
+the Candidate Race card afterwards: the `head advanced first` share should fall,
+which is visible in minutes, long before a cumulative share percentage moves.
+
+### Ruled out, so nobody re-investigates them
+
+Every one of these was measured, not assumed:
+
+- **CPU is 8x faster than the Pi.** sha256 of 1KB 0.0035 ms vs 0.0333, secp256k1
+  sign 0.47 ms vs 3.13, a 1e6 busy loop 1.9 ms vs 15.8.
+- **The process is not being starved.** Event-loop lag over 45 s: p99 2.1 ms,
+  max 3.2 ms, zero stalls above 250 ms.
+- **Not Docker Desktop's CPU limits.** The container sits at 0.03% of 16 cores
+  with a load average of 0.05.
+- **Not DNS.** 5-8 ms once cached.
+- **Not connection churn.** One pooled TLS connection, reused, held for the
+  whole sampling window.
+- **Not power management.** Requests spaced 5 s apart — the producer's own
+  rhythm — are *faster* than back-to-back ones.
+
+An earlier version of this investigation concluded the machine was slow at local
+work. That was wrong: it rested on a single burst of warm round trips that
+happened to catch the hotspot on a good stretch, and on reading the median where
+the tail is the thing that differs.
