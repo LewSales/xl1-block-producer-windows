@@ -50,11 +50,52 @@ function Start-Producer {
   # so the mount cannot land somewhere else without saying so.
   $env:XL1_PRODUCER_PRESET = $Preset
   if (-not (Test-Path $Preset)) { throw "producer preset missing: $Preset" }
-  & docker compose -f $Upstream -f $Tuning --profile preset up -d preset
+  $up = @('up', '-d', 'preset')
+  # The preset arrives as a single-file bind mount, and a WSL-made one is worse
+  # here than on the dashboard: when the shim is gone Docker creates a directory
+  # where the file should be, and the node will not start at all. Recreate it
+  # from Windows paths once, deliberately, rather than at the next reboot.
+  if (Test-WslBound (Get-ProducerContainer)) {
+    Say 'producer mounts were made from WSL -- recreating from Windows paths' 'Yellow'
+    $up = @('up', '-d', '--force-recreate', 'preset')
+  }
+  & docker compose -f $Upstream -f $Tuning --profile preset @up
 }
 
 function Get-Snapshot {
   try { Invoke-RestMethod -Uri $Api -TimeoutSec 6 } catch { $null }
+}
+
+function Get-WslBoundContainers {
+  # A bind mount made from inside WSL is not the same thing as one made from
+  # PowerShell, even when both name the same folder. Docker Desktop reaches a
+  # WSL path through a per-distro shim it sets up while that distro is running;
+  # a C:\ path it reaches through the permanent drive share. After Docker
+  # Desktop restarts, the restart policy brings containers back before WSL is
+  # up, the shim is not there, and the mount silently resolves to an empty
+  # directory -- the dashboard then reports a collector that is in fact writing
+  # every minute, and the producer's preset is simply not there.
+  #
+  # The tell is the mount source: C:\... was created from Windows, /mnt/c/...
+  # from inside WSL. Recreating from PowerShell is what fixes it for good.
+  return @(@((Get-ProducerContainer), 'xl1-dashboard') | Where-Object { Test-WslBound $_ })
+}
+
+function Test-WslBound {
+  param([string]$Container)
+  # --format '{{json .Mounts}}' rather than a Go template with a quoted string
+  # in it: PowerShell strips the inner quotes on the way to docker.exe, and the
+  # template then fails to parse. And an inspect of a container that does not
+  # exist writes to stderr, which is a terminating error while EAP is Stop.
+  $eap = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  $json = & docker inspect $Container --format '{{json .Mounts}}' 2>$null
+  $ErrorActionPreference = $eap
+  if ($LASTEXITCODE -ne 0 -or -not $json) { return $false }
+  foreach ($m in @(($json | ConvertFrom-Json))) {
+    if ($m -and $m.Type -eq 'bind' -and $m.Source -and $m.Source.StartsWith('/')) { return $true }
+  }
+  return $false
 }
 
 function Get-ProducerContainer {
@@ -70,7 +111,15 @@ switch ($Command) {
     if (-not (Test-Path $ProducerEnv)) { throw "$ProducerEnv is missing. Copy the template in config\ and fill it in." }
     Head 'Starting'
     Start-Producer
-    & docker compose -f $DashCompose up -d
+    # up -d leaves an already-running container alone, which is right unless the
+    # thing wrong with it is the mount it was created with. Start-Producer makes
+    # the same call for the node.
+    $dashUp = @('up', '-d')
+    if (Test-WslBound 'xl1-dashboard') {
+      Say 'dashboard mounts were made from WSL -- recreating from Windows paths' 'Yellow'
+      $dashUp = @('up', '-d', '--force-recreate')
+    }
+    & docker compose -f $DashCompose @dashUp
     Say 'producer and dashboard started' 'Green'
     Say 'dashboard: http://127.0.0.1:8088'
   }
@@ -90,7 +139,12 @@ switch ($Command) {
     Assert-Docker
     Head 'Restarting'
     Start-Producer
-    & docker compose -f $DashCompose restart
+    # up --force-recreate, not restart. A restart keeps the container it has,
+    # including a bind mount that no longer reaches the host -- which is the one
+    # failure the dashboard's own error message tells people to run this for.
+    # The dashboard keeps nothing in the container worth preserving; its history
+    # is in state\dashboard, on the host side of that mount.
+    & docker compose -f $DashCompose up -d --force-recreate
     Say 'restarted' 'Green'
   }
 
@@ -173,10 +227,32 @@ switch ($Command) {
       else { Say ('ok    collector fresh (' + $age + 's)') 'Green' }
     }
 
+    # Fine today, broken after the next Docker Desktop restart. Worth failing on
+    # while everything still looks healthy, because by the time it matters the
+    # symptom is a dashboard blaming a collector that is working perfectly.
+    $wsl = @(Get-WslBoundContainers)
+    if ($wsl.Count) {
+      Say ('FAIL  bind mounts made from WSL: ' + ($wsl -join ', ')) 'Red'
+      Say '      they do not survive a Docker Desktop restart -- run xl1ctl restart from PowerShell' 'Red'
+      $issues++
+    }
+    else { Say 'ok    bind mounts created from Windows paths' 'Green' }
+
     $s = Get-Snapshot
     if (-not $s) { Say 'FAIL  dashboard API not responding' 'Red'; $issues++ }
     else {
       Say 'ok    dashboard responding' 'Green'
+      # The two halves of the state directory, checked against each other. The
+      # host side above says the collector is writing; this says whether the
+      # dashboard can see what it wrote. Both halves report themselves healthy
+      # when the mount between them is detached, so only the disagreement finds
+      # it.
+      if ((Test-Path $snap) -and -not $s.node.ok) {
+        Say 'FAIL  the dashboard cannot read the collector snapshot that exists on disk' 'Red'
+        Say ('      ' + $s.node.error) 'Red'
+        Say '      the state\ bind mount is detached; xl1ctl restart recreates the container' 'Red'
+        $issues++
+      }
       if ($s.node.eligibility.blocked -and -not $s.node.eligibilityIgnored) {
         Say ('FAIL  producer ineligible: ' + $s.node.eligibility.reason) 'Red'; $issues++
       }

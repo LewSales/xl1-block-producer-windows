@@ -86,8 +86,16 @@ if (-not $ProducerOnly) {
   # Bare short sha, not `git describe`: describe prefers the nearest tag and
   # yields something GitHub cannot resolve as a commit, breaking the dashboard's
   # own "read the code" link the moment a release is tagged.
+  #
+  # PowerShell 5.1 turns anything a native command writes to stderr into a
+  # terminating error while ErrorActionPreference is Stop, and git writes its
+  # line-ending advice there -- which aborted a build over a warning about
+  # .gitignore. The exit code is what these two calls are read for anyway.
+  $eap = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
   $commit = (git -C $Root rev-parse --short=8 HEAD 2>$null)
   if ($commit) { git -C $Root diff --quiet 2>$null; if ($LASTEXITCODE -ne 0) { $commit = "$commit-dirty" } }
+  $ErrorActionPreference = $eap
   if (-not $commit) { $commit = 'unknown' }
   $builtAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
   & docker build --platform $Platform --build-arg "DASH_COMMIT=$commit" --build-arg "DASH_BUILT_AT=$builtAt" -t xl1-dashboard:local $Dash

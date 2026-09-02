@@ -25,6 +25,10 @@ services:
       # Not 127.0.0.1: inside a container that is the container. Docker Desktop
       # maps host.docker.internal to Windows.
       XL1_HEALTH_URL: http://host.docker.internal:9099
+      # Decides the wording of the "state directory is missing" advice only.
+      # The Pi's unit leaves it unset; the remedy there is a systemd edit, and
+      # here it is a container recreate.
+      DASH_HOST_PLATFORM: windows
       XL1_STATUS_FILE: /var/lib/xl1/producer-status.json
       DASH_TREND_FILE: /var/lib/xl1/dashboard/trend.jsonl
       # Producer standings, tallied by the same chain scan that counts this

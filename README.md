@@ -95,6 +95,20 @@ powershell -ExecutionPolicy Bypass -File .\Build.ps1 -DashboardOnly
 .\scripts\xl1ctl.ps1 restart
 ```
 
+### Run them from PowerShell, not from WSL
+
+`docker compose` answers from an Ubuntu shell too, and the containers it starts
+there look identical — until Docker Desktop restarts. Docker Desktop reaches a
+Windows path (`C:\...`) through the permanent drive share, but a path handed to
+it from inside WSL (`/mnt/c/...`) through a per-distro shim that exists only
+while that distro is running. Docker Desktop starts its containers before WSL is
+up, so after a reboot the shim is not there, the mount resolves to an empty
+directory, and nothing says so: the dashboard reports a collector that is in
+fact writing every thirty seconds, and the panels fed from that file go blank.
+
+`xl1ctl.ps1 doctor` reports any container whose mounts came from a WSL path,
+and `restart` recreates them — a plain `docker restart` keeps the dead mount.
+
 ## Tests
 
 ```powershell
