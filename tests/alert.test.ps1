@@ -34,6 +34,11 @@ function Hasnt { param($name, $needle, $text) if ($text -match [regex]::Escape($
 $probe = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
 $probe.Start(); $Port = $probe.LocalEndpoint.Port; $probe.Stop()
 
+# A sink for delivery, on its own port so it outlives the status server that the
+# outage cases deliberately kill.
+$probe2 = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+$probe2.Start(); $SinkPort = $probe2.LocalEndpoint.Port; $probe2.Stop()
+
 $server = Start-Job -ScriptBlock {
   param($dir, $port)
   $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $port)
@@ -47,9 +52,16 @@ $server = Start-Job -ScriptBlock {
       # Drain the headers. Answering before the request is fully sent gets the
       # response reset by the client's stack rather than read.
       while ($true) { $line = $reader.ReadLine(); if ($null -eq $line -or $line -eq '') { break } }
+      $verb = ($request -split ' ')[0]
       $name = (($request -split ' ')[1]).TrimStart('/').Split('?')[0]
       $file = Join-Path $dir $name
-      if (Test-Path $file) {
+      if ($verb -eq 'POST') {
+        # Stands in for ntfy or a webhook: anything posted is accepted, so the
+        # test is about whether the request could be BUILT, not about the far end.
+        $bytes = [byte[]]@()
+        $head = "HTTP/1.1 200 OK`r`nContent-Length: 0`r`nConnection: close`r`n`r`n"
+      }
+      elseif (Test-Path $file) {
         $bytes = [Text.Encoding]::UTF8.GetBytes((Get-Content $file -Raw))
         $head = "HTTP/1.1 200 OK`r`nContent-Type: application/json`r`nContent-Length: $($bytes.Length)`r`nConnection: close`r`n`r`n"
       } else {
@@ -65,8 +77,29 @@ $server = Start-Job -ScriptBlock {
   }
 } -ArgumentList $Work, $Port
 
+$sink = Start-Job -ScriptBlock {
+  param($port)
+  $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $port)
+  $listener.Start()
+  while ($true) {
+    $client = $listener.AcceptTcpClient()
+    try {
+      $stream = $client.GetStream()
+      $reader = New-Object IO.StreamReader($stream)
+      $null = $reader.ReadLine()
+      while ($true) { $line = $reader.ReadLine(); if ($null -eq $line -or $line -eq '') { break } }
+      $hb = [Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK`r`nContent-Length: 0`r`nConnection: close`r`n`r`n")
+      $stream.Write($hb, 0, $hb.Length); $stream.Flush()
+    } catch {}
+    finally { $client.Close() }
+  }
+} -ArgumentList $SinkPort
+
 function Stop-Fixture {
   if ($server) { Stop-Job $server -ErrorAction SilentlyContinue; Remove-Job $server -Force -ErrorAction SilentlyContinue }
+}
+function Stop-Sink {
+  if ($sink) { Stop-Job $sink -ErrorAction SilentlyContinue; Remove-Job $sink -Force -ErrorAction SilentlyContinue }
 }
 
 try {
@@ -147,6 +180,34 @@ XL1_ALERT_NAME=testnode
   $out = A
   Hasnt 'second run is silent' 'XL1 testnode' $out
 
+  # ntfy carries the title in an HTTP header, and .NET rejects anything outside
+  # ASCII in one -- it throws "invalid Control characters" and the notification
+  # is lost. Every message in the alerter is written with em dashes, so this
+  # silently dropped every recovery notice and several conditions. The log still
+  # recorded the alert as raised, because it had been; only the delivery was
+  # gone, which is the worst shape a monitoring bug can take.
+  #
+  # `swapping` is the condition used here because its text actually contains one:
+  #   Heavy swap use - this machine is short of RAM     (with an em dash)
+  # Delivery is asserted through the absence of the complaint Send-Alert makes
+  # when no channel accepted the message.
+  $env3 = Join-Path $Work 'alert3.env'
+  @"
+XL1_ALERT_URL=http://127.0.0.1:$Port/status.json
+XL1_ALERT_STATE=$Work\.alert-state3
+XL1_ALERT_NAME=testnode
+XL1_ALERT_NTFY_SERVER=http://127.0.0.1:$SinkPort
+XL1_ALERT_NTFY_TOPIC=t
+"@ | Set-Content -Path $env3 -Encoding UTF8
+  $oldEnv = $env:XL1_ALERT_ENV
+  $env:XL1_ALERT_ENV = $env3
+  try { $out = (& $Alert *>&1 | Out-String) } finally { $env:XL1_ALERT_ENV = $oldEnv }
+
+  $fired = @(Get-Content (Join-Path $Work '.alert-state3') -ErrorAction SilentlyContinue | Where-Object { $_ })
+  Check 'the em-dash condition actually fired' ($fired -match 'swapping').Count 1
+  Hasnt 'no channel refused the em-dash title'   'no channel delivered'       $out
+  Hasnt 'the header was not rejected as invalid' 'invalid Control characters' $out
+
   # The dashboard dying must not read as everything healing.
   Stop-Fixture; $server = $null
   foreach ($i in 1..40) {
@@ -162,9 +223,11 @@ XL1_ALERT_NAME=testnode
 
   $out = A -Status
   Has '-Status admits it could not look' 'COULD NOT READ STATUS' $out
+
 }
 finally {
   Stop-Fixture
+  Stop-Sink
   Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue
 }
 

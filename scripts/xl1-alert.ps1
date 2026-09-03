@@ -110,13 +110,35 @@ try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::
 
 # ------------------------------------------------------------------- delivery
 
+# ntfy carries the title in an HTTP header, and .NET refuses to put anything
+# outside ASCII in one -- it throws "invalid Control characters" and the send is
+# lost. Every message in this file is written with em dashes, so that silently
+# dropped every recovery notice, every cooldown repeat, and any condition whose
+# text had a dash in it. The failure looked like nothing at all: the log line
+# said the alert had been raised, because it had been, just not delivered.
+#
+# Only the header is folded down. The body is sent as UTF-8 bytes and keeps the
+# punctuation it was written with.
+function ConvertTo-HeaderSafe {
+  param([string]$Text)
+  $out = $Text -replace '[\u2010-\u2015]', '-'      # hyphens through em dash
+  $out = $out -replace '[\u2018\u2019]', "'"          # curly single quotes
+  $out = $out -replace '[\u201C\u201D]', '"'          # curly double quotes
+  $out = $out -replace '[\u2026]', '...'              # ellipsis
+  # Anything still outside printable ASCII would throw, so it goes rather than
+  # taking the notification with it.
+  $out -replace '[^\x20-\x7E]', '?'
+}
+
 # A log that survives the run, because a scheduled task's console goes nowhere.
 # Capped rather than rotated: this is a diary of transitions, not a log of work.
 function Write-AlertLog {
   param([string]$Line)
   try {
-    if (-not (Test-Path $StateDir)) { New-Item -ItemType Directory -Path $StateDir -Force | Out-Null }
-    $f = Join-Path $StateDir '.alert-log'
+    $dir = Split-Path -Parent $StateFile
+    if (-not $dir) { $dir = $StateDir }
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $f = Join-Path $dir '.alert-log'
     Add-Content -Path $f -Value ("{0}  {1}" -f (Get-Date -Format 'o'), $Line)
     $lines = @(Get-Content -Path $f -ErrorAction SilentlyContinue)
     if ($lines.Count -gt 500) { Set-Content -Path $f -Value $lines[-500..-1] }
@@ -137,7 +159,7 @@ function Send-Alert {
     }
     try {
       Invoke-RestMethod -Uri "$NtfyServer/$NtfyTopic" -Method Post -TimeoutSec 15 `
-        -Headers @{ Title = $Title; Priority = $Priority; Tags = $tag } `
+        -Headers @{ Title = (ConvertTo-HeaderSafe $Title); Priority = $Priority; Tags = $tag } `
         -Body ([Text.Encoding]::UTF8.GetBytes($Body)) | Out-Null
       $sent = 1
     } catch { Write-AlertLog "ntfy failed: $($_.Exception.Message)" }
@@ -167,7 +189,7 @@ function Send-Alert {
         $from = if ($SmtpFrom) { $SmtpFrom } else { $Email }
         $params = @{
           To = $Email; From = $from
-          Subject = $Title; Body = $Body; SmtpServer = $SmtpServer; Port = $SmtpPort
+          Subject = (ConvertTo-HeaderSafe $Title); Body = $Body; SmtpServer = $SmtpServer; Port = $SmtpPort
           UseSsl = $true; ErrorAction = 'Stop'
         }
         if ($SmtpUser) {
