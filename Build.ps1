@@ -53,7 +53,12 @@ if (-not $DashboardOnly) {
     # COREPACK_ENABLE_DOWNLOAD_PROMPT=0: corepack asks before fetching pnpm, and
     # with no TTY on stdin that question is never answered -- the container sits
     # there forever, which reads as a slow network rather than as a hang.
-    & docker run --rm -e COREPACK_ENABLE_DOWNLOAD_PROMPT=0 -v "${Upstream}:/w" -w /w $img sh -lc $cmd
+    # The pnpm store lives in a named volume rather than in the container, so a
+    # compile that dies half way through the download -- which on a slow link is
+    # most of them -- resumes from what it already has instead of fetching
+    # upstream's entire dev tree again.
+    & docker run --rm -e COREPACK_ENABLE_DOWNLOAD_PROMPT=0 -e PNPM_HOME=/pnpm -e npm_config_store_dir=/pnpm/store `
+      -v xl1-pnpm-store:/pnpm -v "${Upstream}:/w" -w /w $img sh -lc $cmd
     if ($LASTEXITCODE -ne 0) { Die 'entrypoint compile failed' }
   }
   else { Say 'entrypoint already compiled' }

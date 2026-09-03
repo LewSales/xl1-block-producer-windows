@@ -26,6 +26,7 @@ $Root        = Split-Path -Parent $PSScriptRoot
 $Upstream    = Join-Path $Root 'upstream\compose\node.yml'
 $Tuning      = Join-Path $Root 'compose\producer-tuning.yml'
 $Preset      = Join-Path $Root 'presets\roles\producer.json'
+$PresetRest  = Join-Path $Root 'presets\roles\producer-rest.json'
 $DashCompose = Join-Path $Root 'dashboard.yml'
 $ProducerEnv = Join-Path $Root 'config\sequence-producer.env'
 $Api         = 'http://127.0.0.1:8088/api/status'
@@ -49,7 +50,10 @@ function Start-Producer {
   # which is upstream\compose, not the override that declares it. Absolute,
   # so the mount cannot land somewhere else without saying so.
   $env:XL1_PRODUCER_PRESET = $Preset
+  # Both roles are mounted; XL1_ROLE in config\sequence-producer.env picks one.
+  $env:XL1_PRODUCER_PRESET_REST = $PresetRest
   if (-not (Test-Path $Preset)) { throw "producer preset missing: $Preset" }
+  if (-not (Test-Path $PresetRest)) { throw "producer preset missing: $PresetRest" }
   $up = @('up', '-d', 'preset')
   # The preset arrives as a single-file bind mount, and a WSL-made one is worse
   # here than on the dashboard: when the shim is gone Docker creates a directory
@@ -130,6 +134,7 @@ switch ($Command) {
     $env:XL1_IMAGE = 'xl1:local'
     $env:XL1_PRESET_ENV_FILE = '../../config/sequence-producer.env'
     $env:XL1_PRODUCER_PRESET = $Preset
+    $env:XL1_PRODUCER_PRESET_REST = $PresetRest
     & docker compose -f $Upstream -f $Tuning --profile preset stop preset
     & docker compose -f $DashCompose stop
     Say 'stopped' 'Green'

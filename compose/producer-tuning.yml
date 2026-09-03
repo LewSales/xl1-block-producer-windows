@@ -23,7 +23,15 @@
 # volume paths against the FIRST compose file's directory (upstream\compose),
 # not against the override that declares them — a relative path here would to
 # the wrong place in a way that fails silently.
+#
+# Both role presets are shadowed and XL1_ROLE in config\sequence-producer.env
+# picks which one the node reads. producer reads the chain over RPC;
+# producer-rest reads it from the REST CDNs and keeps only mempool submission on
+# RPC. On 2 September 2026 an RPC schema change stopped every producer on the
+# network that read the chain that way, this one included, so the role is worth
+# knowing about before the next one. Mounting the unused file costs nothing.
 services:
   preset:
     volumes:
       - ${XL1_PRODUCER_PRESET:?XL1_PRODUCER_PRESET must be set — xl1ctl.ps1 sets it}:/opt/xl1/presets/roles/producer.json:ro
+      - ${XL1_PRODUCER_PRESET_REST:?XL1_PRODUCER_PRESET_REST must be set — xl1ctl.ps1 sets it}:/opt/xl1/presets/roles/producer-rest.json:ro
