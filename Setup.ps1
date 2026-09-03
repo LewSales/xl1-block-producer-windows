@@ -105,6 +105,16 @@ else {
   Say 'created config\dashboard.env' 'Green'
 }
 
+# Every channel in it is empty, so the alerter runs and delivers nothing until
+# an operator fills one in. Created anyway: a file that exists gets edited, and
+# one that has to be found first does not.
+$alertEnv = Join-Path $cfg 'alert.env'
+if (Test-Path $alertEnv) { Say 'config\alert.env already exists -- left untouched' }
+else {
+  Copy-Item (Join-Path $cfg 'alert.env.template') $alertEnv
+  Say 'created config\alert.env (no channels set -- alerts are off until you edit it)' 'Green'
+}
+
 Head 'Dashboard source'
 $dashDir = Join-Path $Root 'dashboard'
 if (Test-Path (Join-Path $dashDir 'server.mjs')) { Say 'dashboard\ already present' }
@@ -162,6 +172,32 @@ if (-not $SkipTask) {
     Say "could not register the scheduled task: $($_.Exception.Message)" 'Yellow'
     Say 'Run this elevated, or start the collector by hand:' 'Yellow'
     Say "  powershell -File `"$script`"" 'Yellow'
+  }
+
+  # The Pi's xl1-alert.timer, in the only scheduler this machine has. Separate
+  # from the collector because they fail independently: an alerter that cannot
+  # reach its webhook must not stop the snapshot the dashboard reads, and a
+  # collector that dies is a condition the alerter is supposed to report.
+  $alertTask   = 'XL1 Alerter'
+  $alertScript = Join-Path $Root 'scripts\xl1-alert.ps1'
+  $alertArgs   = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $alertScript + '"'
+  $alertAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $alertArgs
+  # Two minutes after the collector's first run, so the first evaluation reads a
+  # snapshot rather than reporting a collector that has not written one yet.
+  $aNow  = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(2) `
+             -RepetitionInterval $every -RepetitionDuration $forever
+  $aBoot = New-ScheduledTaskTrigger -AtStartup
+  try {
+    Unregister-ScheduledTask -TaskName $alertTask -Confirm:$false -ErrorAction SilentlyContinue
+    Register-ScheduledTask -TaskName $alertTask -Action $alertAction -Trigger @($aNow, $aBoot) `
+      -Settings $settings -RunLevel Highest -Force | Out-Null
+    Start-ScheduledTask -TaskName $alertTask
+    Say 'registered and started "XL1 Alerter" (every 60s)' 'Green'
+    Say 'it delivers nothing until a channel is set in config\alert.env' 'Gray'
+  }
+  catch {
+    Say "could not register the alerter task: $($_.Exception.Message)" 'Yellow'
+    Say "  powershell -File `"$alertScript`"" 'Yellow'
   }
 }
 

@@ -38,7 +38,9 @@ foreach ($f in @(
   (Join-Path $Root 'Build.ps1'),
   (Join-Path $Root 'Tests.ps1'),
   (Join-Path $Root 'scripts\xl1ctl.ps1'),
-  (Join-Path $Root 'scripts\xl1-collect.ps1')
+  (Join-Path $Root 'scripts\xl1-collect.ps1'),
+  (Join-Path $Root 'scripts\xl1-alert.ps1'),
+  (Join-Path $Root 'tests\alert.test.ps1')
 )) {
   if (-not (Test-Path $f)) { Bad "$(Split-Path -Leaf $f) -- missing"; continue }
   $errors = $null
@@ -90,6 +92,21 @@ foreach ($pair in @(
   } else {
     Bad "$($pair.file) no longer says it is unaffiliated with XYO"
   }
+}
+
+# ------------------------------------------------------------ alert behaviour
+#
+# The alerter is the one part of this bundle that is supposed to speak when
+# nobody is watching, so the cases that matter are the ones where it stayed
+# quiet: conditions live and nothing reported, and recoveries announced for
+# conditions it could not see. Served over a loopback socket, so the fetch path
+# under test is the one the scheduled task uses.
+Step 'Alert behaviour'
+$alertTest = Join-Path $Root 'tests\alert.test.ps1'
+if (-not (Test-Path $alertTest)) { Bad 'tests\alert.test.ps1 -- missing' }
+else {
+  & powershell -NoProfile -ExecutionPolicy Bypass -File $alertTest
+  if ($LASTEXITCODE -eq 0) { Ok 'alert tests passed' } else { Bad 'alert tests failed' }
 }
 
 # ---------------------------------------------------------- dashboard behaviour

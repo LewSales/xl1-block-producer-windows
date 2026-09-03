@@ -15,9 +15,10 @@
 [CmdletBinding()]
 param(
   [Parameter(Position = 0)]
-  [ValidateSet('status', 'start', 'stop', 'restart', 'logs', 'addr', 'doctor', 'dashboard', 'backup')]
+  [ValidateSet('status', 'start', 'stop', 'restart', 'logs', 'addr', 'doctor', 'dashboard', 'backup', 'alert')]
   [string]$Command = 'status',
   [switch]$Follow,
+  [switch]$Test,
   [int]$Lines = 60
 )
 
@@ -191,6 +192,34 @@ switch ($Command) {
     Say ('written to ' + $dest) 'Green'
   }
 
+  'alert' {
+    # A thin front door onto scripts\xl1-alert.ps1, so the alerter is
+    # discoverable from the one command an operator already knows. It reads the
+    # dashboard's own /api/status, which is why this says nothing about Docker.
+    $alert = Join-Path $PSScriptRoot 'xl1-alert.ps1'
+    if (-not (Test-Path $alert)) { Say 'scripts\xl1-alert.ps1 is missing' 'Red'; break }
+
+    if ($Test) {
+      Head 'Alert test'
+      Say 'Sending one notification through every configured channel.'
+      & $alert -Test
+    }
+    else {
+      Head 'Alerts'
+      $cfgFile = Join-Path $Root 'config\alert.env'
+      if (-not (Test-Path $cfgFile)) {
+        Say 'config\alert.env does not exist -- nothing is configured' 'Yellow'
+        Say 'Copy config\alert.env.template to config\alert.env and fill in a channel.' 'Yellow'
+      }
+      # Firing conditions only. Delivery is not re-tried here: this shows what
+      # the alerter would say, and sending a copy every time someone looked
+      # would make the channel useless.
+      & $alert -Status
+      Say ''
+      Say 'Send a test notification with:  .\xl1ctl.ps1 alert -Test' 'Gray'
+    }
+  }
+
   'doctor' {
     Head 'Diagnosis'
     $issues = 0
@@ -284,7 +313,15 @@ switch ($Command) {
     Head 'Chain'
     Say ('block      ' + $s.chain.currentBlock + '   finalized ' + $s.chain.finalizedBlock + '   lag ' + $s.chain.finalizationLag)
     if ($s.derived.secondsPerBlock) { Say ('rate       ' + $s.derived.secondsPerBlock + 's/block') }
-    Say ('submitted  ' + $s.node.blocksPublished)
+    # Chain-counted, not log-counted. The collector's blocksPublished greps for
+    # "published block", a string xl1-cli does not emit, so it read 0 forever --
+    # the same defect the dashboard's headline count was moved off.
+    if ($null -ne $s.derived.blocksByWindow.day24h) {
+      Say ('won 24h    ' + $s.derived.blocksByWindow.day24h)
+    }
+    if ($null -ne $s.peers.self.blocks) {
+      Say ('won total  ' + $s.peers.self.blocks + '   (' + $s.peers.self.sharePercent + '% of ' + $s.peers.scannedBlocks + ' scanned)')
+    }
     if ($s.derived.lastBlock) {
       Say ('last block #' + $s.derived.lastBlock + '  (' + $s.derived.blocksSinceLast + ' blocks ago)') 'Green'
     }

@@ -22,6 +22,7 @@ changes that. A desktop CPU is the fix.
   upstream/compose/node.yml  --profile preset      the producer, XYO's file, unmodified
   dashboard.yml                                    the dashboard, mine
   scripts/xl1-collect.ps1                          scheduled task, writes state/producer-status.json
+  scripts/xl1-alert.ps1                            scheduled task, reads /api/status and notifies
   scripts/xl1ctl.ps1                               one command instead of two compose files
 ```
 
@@ -84,6 +85,8 @@ longer running, go quiet.
 .\scripts\xl1ctl.ps1 addr         # which address the node signs as
 .\scripts\xl1ctl.ps1 doctor       # exits non-zero when something is wrong
 .\scripts\xl1ctl.ps1 backup       # zips config\ — unencrypted, treat as a password
+.\scripts\xl1ctl.ps1 alert        # what the alerter would report right now
+.\scripts\xl1ctl.ps1 alert -Test  # one notification through every configured channel
 .\scripts\xl1ctl.ps1 stop
 ```
 
@@ -144,10 +147,48 @@ same reason. Every other binding is theirs.
 powershell -ExecutionPolicy Bypass -File .\Tests.ps1
 ```
 
-Parses every script, checks the panel's inline script, and runs the dashboard
-suite against a stubbed SDK — no Docker, no producer, no network.
+Parses every script, checks the panel's inline script, exercises the alerter
+against a fixture served over loopback, and runs the dashboard suite against a
+stubbed SDK — no Docker, no producer, no network.
 `tests\dashboard.test.mjs` is the same file as the Pi bundle's, because
 `dashboard\` is the same source; keep it that way.
+
+## Alerts
+
+Nothing on the dashboard helps at 3am. `scripts\xl1-alert.ps1` runs every 60
+seconds as the **XL1 Alerter** scheduled task, reads the dashboard's own
+`/api/status`, and pushes what it finds to whichever channels are filled in:
+
+```powershell
+notepad .\config\alert.env       # ntfy topic, Discord/Slack webhook, email, dead-man URL
+.\scripts\xl1ctl.ps1 alert -Test  # prove the channel works before you need it
+```
+
+It is the Pi bundle's `xl1-alert.sh` under a different scheduler — same variable
+names, same condition keys, same transition rules — so an operator running both
+machines configures them identically and gets messages that read the same.
+
+It fires **on transitions, not on conditions**. Something that breaks is
+reported once, repeated once per `XL1_ALERT_COOLDOWN` (6h) while it stays
+broken, and reported again when it clears. An alerter that repeats every minute
+is one nobody reads, which is the same as having none.
+
+Two of the conditions are worth naming, because every other signal reads green
+through both:
+
+- **`not-producing`** — the node is up, healthy, reachable, and has not landed a
+  block in `XL1_ALERT_STALL_BLOCKS` (90) chain blocks. Counted from the chain,
+  never from the log: `Published block:` means *submitted*, and a node can
+  submit all day without one being accepted.
+- **`never-produced`** — the container came up and has never built a block at
+  all, which is a different failure from producing and losing. `/livez` passes
+  forever in that state, so the container is never unhealthy, never exits, and
+  no restart policy recovers it. Only an operator does.
+
+The one thing this cannot report is the PC dying, because a dead PC sends
+nothing and so does a healthy one. That is what `XL1_ALERT_DEADMAN_URL` is for:
+point it at a healthchecks.io or Uptime Kuma push monitor and the absence of a
+ping becomes the alarm.
 
 ## Producer standings
 
@@ -218,6 +259,8 @@ Restart the dashboard after editing the file:
 |---|---|---|
 | Service manager | systemd units | Docker Compose `restart: unless-stopped` |
 | Collector | systemd timer, 30s | Task Scheduler, 30s |
+| Alerter | `xl1-alert.timer`, 60s | Task Scheduler, 60s |
+| Alert email | `mail`/`sendmail` if installed | needs an SMTP relay named in `alert.env` |
 | Producer networking | `--network host` | published port + `host.docker.internal` |
 | Host metrics | `/proc`, sysfs | `Get-CimInstance`, because a container sees the Docker VM |
 | Image build | cross-built under QEMU | native amd64 |

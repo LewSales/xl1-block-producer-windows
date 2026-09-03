@@ -136,15 +136,24 @@ if ($LASTEXITCODE -ne 0 -or -not $inspect) {
 $f = $inspect.Trim() -split '\|'
 $started = [datetime]::Parse($f[2])
 $up = (Get-Date) - $started.ToLocalTime()
-$uptime = if ($up.TotalDays -ge 1) { '{0}d {1}h' -f [int]$up.TotalDays, $up.Hours }
-          elseif ($up.TotalHours -ge 1) { '{0}h {1}m' -f [int]$up.TotalHours, $up.Minutes }
-          else { '{0}m' -f [int]$up.TotalMinutes }
+# [int] in PowerShell ROUNDS, it does not truncate, so a container up 1h31m
+# reported "2h 31m" -- an uptime that ran ahead of the truth by up to half an
+# hour and, on the day scale, by twelve. The Pi's shell arithmetic truncates,
+# which is what makes the two panels disagree about the same container.
+$uptime = if ($up.TotalDays -ge 1) { '{0}d {1}h' -f [int][Math]::Floor($up.TotalDays), $up.Hours }
+          elseif ($up.TotalHours -ge 1) { '{0}h {1}m' -f [int][Math]::Floor($up.TotalHours), $up.Minutes }
+          else { '{0}m' -f [int][Math]::Floor($up.TotalMinutes) }
 
 $doc.container = [ordered]@{
   name = $Container; state = $f[0]; running = ($f[1] -eq 'true')
   uptime = $uptime; restartCount = [int]$f[3]; image = $f[4]; health = $f[5]
 }
 $imageId = $f[6]
+
+# Seconds since this container started. The uptime string above is for reading;
+# this is for comparing against a grace period, and parsing "1h 12m" back into a
+# number to do it would be inventing a format to immediately regret.
+if ($f[1] -eq 'true') { $doc.runSeconds = [int][Math]::Floor($up.TotalSeconds) }
 
 # ------------------------------------------------------------------------ logs
 $since = Join-Path $StateDir '.collect-cursor'
@@ -159,6 +168,32 @@ $total += $published.Count
 Set-Content -Path $counterFile -Value $total -NoNewline
 
 $doc.blocksPublished = $total
+
+# Blocks this container has attempted to build since IT started, which is a
+# different question from how many it has won and the only one that catches a
+# producer that came up in the non-producing state. Such a node passes /livez
+# forever, so it never goes unhealthy, never exits, and no restart policy
+# recovers it -- only an operator does.
+#
+# Counted per run rather than cumulatively: the question is about this launch.
+# On a new container the count is re-derived from its start (the log is short by
+# definition at that point) and incremented from the usual slice thereafter, so
+# the steady-state cost stays one match over the lines already fetched.
+$runFile = Join-Path $StateDir '.run-builds'
+$prevStarted = ''; $builds = 0
+if (Test-Path $runFile) {
+  $parts = (Get-Content $runFile -Raw).Trim() -split "`t"
+  if ($parts.Count -ge 2) { $prevStarted = $parts[0]; [int]::TryParse($parts[1], [ref]$builds) | Out-Null }
+}
+if ($prevStarted -ne $f[2]) {
+  $builds = @(Invoke-Docker logs --since $f[2] $Container | Select-String -Pattern 'building block').Count
+}
+else {
+  $builds += @($newLog | Select-String -Pattern 'building block').Count
+}
+Set-Content -Path $runFile -Value ($f[2] + "`t" + $builds) -NoNewline
+
+$doc.buildsThisRun = $builds
 
 # ---------------------------------------------------------------- latency
 #
