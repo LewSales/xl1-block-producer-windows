@@ -35,9 +35,27 @@ function Invoke-Native {
   if ($LASTEXITCODE -ne 0) { Die "$What failed (exit $LASTEXITCODE)" }
 }
 
+# Registering a scheduled task needs administrator, and PowerShell cannot
+# elevate itself part-way through a script. Asked once, up front, because the
+# answer decides what this run can finish -- the Pi's provision.sh refuses at
+# line one for the same reason, and the alternative here was letting an operator
+# sit through a git fetch and an image build to be told "Access is denied" twice
+# at the end, with nothing saying why or what to do about it.
+function Test-Elevated {
+  try {
+    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+    (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole(
+      [Security.Principal.WindowsBuiltInRole]::Administrator)
+  }
+  catch { $false }
+}
+
 function Say  { param($m, $c = 'Gray') Write-Host "  $m" -ForegroundColor $c }
 function Head { param($m) Write-Host ''; Write-Host "==> $m" -ForegroundColor Cyan }
 function Die  { param($m) Write-Host ''; Write-Host "error: $m" -ForegroundColor Red; exit 1 }
+
+$Elevated = Test-Elevated
+$Relaunch = "Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File','$PSCommandPath'"
 
 Head 'Prerequisites'
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
@@ -133,13 +151,38 @@ else {
   }
 }
 
+# Warned rather than fatal, unlike the Pi. Everything up to the scheduled tasks
+# -- fetching upstream, building the images, writing the config -- works fine
+# without administrator, and re-running elevated afterwards is idempotent. It is
+# said here rather than at the end so nobody spends the build finding out.
+if (-not $Elevated -and -not $SkipTask) {
+  Say ''
+  Say 'NOT RUNNING AS ADMINISTRATOR' 'Yellow'
+  Say 'Everything below works except registering the scheduled tasks, which is' 'Yellow'
+  Say 'what keeps the collector and the alerter running. To do the whole thing:' 'Yellow'
+  Say ''
+  Say "  $Relaunch" 'Cyan'
+  Say ''
+  Say 'Continuing without the tasks. Add -SkipTask to silence this.' 'Yellow'
+}
+
 if (-not $SkipBuild) {
   Head "Building images (xl1-cli $CliVersion, linux/amd64)"
   & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root 'Build.ps1') -CliVersion $CliVersion
   if ($LASTEXITCODE -ne 0) { Die 'image build failed' }
 }
 
-if (-not $SkipTask) {
+if (-not $SkipTask -and -not $Elevated) {
+  Head 'Scheduled tasks'
+  Say 'skipped -- needs administrator' 'Yellow'
+  Say 'Re-run elevated to register the collector and the alerter:' 'Yellow'
+  Say "  $Relaunch" 'Cyan'
+  # Deliberately not attempted. Unregister-ScheduledTask is -SilentlyContinue,
+  # so a failed re-register used to leave the previous task in place while the
+  # output showed two denials -- which reads as "the tasks are broken now"
+  # rather than "nothing changed".
+}
+elseif (-not $SkipTask) {
   Head 'Collector scheduled task'
   # The dashboard never gets the Docker socket, so something on the host must
   # write the snapshot it reads. On the Pi that is a systemd timer; here it is
@@ -214,4 +257,13 @@ Say ''
 Say '3. Start here:'
 Say '     .\scripts\xl1ctl.ps1 start'
 Say '     .\scripts\xl1ctl.ps1 doctor'
+
+# Last thing on screen, because it is the thing that will otherwise be
+# discovered a week later as a dashboard whose data stopped updating.
+if (-not $Elevated -and -not $SkipTask) {
+  Write-Host ''
+  Say '4. The scheduled tasks are NOT registered. Without them the collector' 'Yellow'
+  Say '   stops feeding the dashboard and nothing sends alerts. Re-run elevated:' 'Yellow'
+  Say "     $Relaunch" 'Cyan'
+}
 Write-Host ''
