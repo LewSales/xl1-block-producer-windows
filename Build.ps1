@@ -12,11 +12,11 @@
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File .\Build.ps1
-  powershell -ExecutionPolicy Bypass -File .\Build.ps1 -CliVersion 5.3.1
+  powershell -ExecutionPolicy Bypass -File .\Build.ps1 -CliVersion 5.3.1   # pin an older one
 #>
 [CmdletBinding()]
 param(
-  [string]$CliVersion  = '5.3.1',
+  [string]$CliVersion  = '5.3.2',
   [string]$NodeVersion = '24.14.1',
   [switch]$ProducerOnly,
   [switch]$DashboardOnly
@@ -50,7 +50,10 @@ if (-not $DashboardOnly) {
     Say 'compiling the entrypoint (in a container -- no Node needed on Windows)'
     $img = 'node:' + $NodeVersion + '-bookworm-slim'
     $cmd = 'corepack enable && pnpm install --frozen-lockfile --prefer-offline && pnpm xy compile'
-    & docker run --rm -v "${Upstream}:/w" -w /w $img sh -lc $cmd
+    # COREPACK_ENABLE_DOWNLOAD_PROMPT=0: corepack asks before fetching pnpm, and
+    # with no TTY on stdin that question is never answered -- the container sits
+    # there forever, which reads as a slow network rather than as a hang.
+    & docker run --rm -e COREPACK_ENABLE_DOWNLOAD_PROMPT=0 -v "${Upstream}:/w" -w /w $img sh -lc $cmd
     if ($LASTEXITCODE -ne 0) { Die 'entrypoint compile failed' }
   }
   else { Say 'entrypoint already compiled' }
