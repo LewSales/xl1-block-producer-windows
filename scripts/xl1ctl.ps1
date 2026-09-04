@@ -259,6 +259,50 @@ switch ($Command) {
     }
     else { Say 'ok    credentials present' 'Green' }
 
+    # The presets the producer is actually running, which is a different
+    # question from the ones in this repository.
+    #
+    # They arrive as two bind mounts declared in compose\producer-tuning.yml.
+    # Recreate the container without that file -- which any script driving
+    # `docker compose` by hand can do by passing one -f instead of two -- and
+    # the mounts vanish silently. The producer then falls back to the presets
+    # baked into the image, and the image ships
+    # blockProductionCheckInterval: 60000 where this repo sets 5000.
+    #
+    # Nothing about that looks wrong. The container runs, /livez passes, the
+    # health check is green, blocks are still produced -- just twelve times less
+    # often, which reads as bad luck rather than as a fault. It cost an hour
+    # here before an operator noticed the node had gone quiet.
+    if ($LASTEXITCODE -eq 0 -or $true) {
+      $state = (& docker inspect xl1-node-preset-1 --format '{{.State.Status}}' 2>$null)
+      # Existence first, and separately. An EMPTY mount list is the failure this
+      # check exists for, so folding it in with "container not found" made the
+      # guard skip the one case it was written to catch -- which it did, twice,
+      # against a container that was genuinely broken at the time.
+      if (-not $state) { Say 'skip  producer container does not exist -- start it first' 'DarkGray' }
+      else {
+        $mounts = @(& docker inspect xl1-node-preset-1 --format '{{range .Mounts}}{{println .Destination}}{{end}}' 2>$null)
+        $want = @('/opt/xl1/presets/roles/producer.json', '/opt/xl1/presets/roles/producer-rest.json')
+        $missing = @($want | Where-Object { $mounts -notcontains $_ })
+        if ($missing.Count) {
+          Say 'FAIL  producer is NOT using this repo''s presets -- the bind mounts are missing' 'Red'
+          Say '      it fell back to the image defaults, which check for work once a minute' 'Red'
+          Say '      instead of every few seconds. Fix: .\scripts\xl1ctl.ps1 restart' 'Red'
+          $issues++
+        }
+        else {
+          # Mounted is not the same as matching: a stale path can mount an old
+          # file. Compare what the container reads against what is on disk.
+          $inside = (& docker exec xl1-node-preset-1 cat /opt/xl1/presets/roles/producer-rest.json 2>$null) -join "`n"
+          $onDisk = (Get-Content $PresetRest -Raw)
+          if ($inside -and ($inside.Trim() -ne $onDisk.Trim())) {
+            Say 'FAIL  the mounted producer-rest preset differs from presets\roles\' 'Red'; $issues++
+          }
+          else { Say 'ok    producer is running this repo''s presets' 'Green' }
+        }
+      }
+    }
+
     $stray = Join-Path $Root 'sequence-producer.env'
     if ((Test-Path $stray) -and ((Get-FileHash $stray).Hash -ne (Get-FileHash $ProducerEnv).Hash)) {
       Say 'FAIL  sequence-producer.env in the project root differs from config\ -- only config\ is read' 'Red'
