@@ -110,7 +110,19 @@ if (Test-Path $stray) {
     Say 'one in config\. Nothing reads it. Delete it to avoid editing the wrong file.' 'Yellow'
   }
   else {
+    $rootKeys = @{}; $liveKeys = @{}
+    foreach ($pair in @(@($stray, $rootKeys), @($producerEnv, $liveKeys))) {
+      foreach ($line in (Get-Content $pair[0] -ErrorAction SilentlyContinue)) {
+        $t = $line.Trim()
+        if ($t -eq '' -or $t.StartsWith('#')) { continue }
+        $i = $t.IndexOf('='); if ($i -lt 1) { continue }
+        $pair[1][$t.Substring(0, $i).Trim()] = $t.Substring($i + 1).Trim()
+      }
+    }
+    $differing = @(($rootKeys.Keys + $liveKeys.Keys | Sort-Object -Unique) |
+      Where-Object { $rootKeys[$_] -ne $liveKeys[$_] })
     Say 'WARNING: sequence-producer.env in the project root DIFFERS from config\.' 'Red'
+    if ($differing.Count) { Say ('         differing key(s): ' + ($differing -join ', ')) 'Red' }
     Say 'Only config\sequence-producer.env is read. If your edits are in the root' 'Red'
     Say 'copy, move them across before starting the producer.' 'Red'
   }
@@ -190,7 +202,7 @@ if (-not $SkipTask -and -not $Elevated) {
   # rather than "nothing changed".
 }
 elseif (-not $SkipTask) {
-  Head 'Collector scheduled task'
+  Head 'Scheduled tasks'
   # The dashboard never gets the Docker socket, so something on the host must
   # write the snapshot it reads. On the Pi that is a systemd timer; here it is
   # Task Scheduler, every 30 seconds, whether or not anyone is logged in.
@@ -243,7 +255,10 @@ elseif (-not $SkipTask) {
       -Settings $settings -RunLevel Highest -Force | Out-Null
     Start-ScheduledTask -TaskName $alertTask
     Say 'registered and started "XL1 Alerter" (every 60s)' 'Green'
-    Say 'it delivers nothing until a channel is set in config\alert.env' 'Gray'
+    if (-not (Test-Path $alertEnv) -or
+        -not (Select-String -Path $alertEnv -Pattern '^(XL1_ALERT_(NTFY_TOPIC|WEBHOOK|EMAIL|DEADMAN_URL))=\s*\S' -Quiet)) {
+      Say 'it delivers nothing until a channel is set in config\alert.env' 'Gray'
+    }
   }
   catch {
     Say "could not register the alerter task: $($_.Exception.Message)" 'Yellow'
@@ -268,7 +283,10 @@ elseif (-not $SkipTask) {
         -Settings $settings -RunLevel Highest -Force | Out-Null
       Start-ScheduledTask -TaskName $pubTask
       Say 'registered and started "XL1 Publisher" (every 5m)' 'Green'
-      Say 'it publishes nothing until XL1_PUBLISH_REPO is set in config\publish.env' 'Gray'
+      if (-not (Test-Path $publishEnv) -or
+          -not (Select-String -Path $publishEnv -Pattern '^XL1_PUBLISH_REPO=\s*\S' -Quiet)) {
+        Say 'it publishes nothing until XL1_PUBLISH_REPO is set in config\publish.env' 'Gray'
+      }
     }
     catch {
       Say "could not register the publisher task: $($_.Exception.Message)" 'Yellow'
