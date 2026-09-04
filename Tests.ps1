@@ -66,15 +66,19 @@ if (-not $node) {
 
   # The panel is one inline script. A syntax error there is a blank page with
   # the message only in a console nobody has open.
-  $html = (Get-Content (Join-Path $Root 'dashboard\index.html') -Raw)
-  $m = [regex]::Match($html, '(?s)<script>(.*)</script>')
-  if ($m.Success) {
-    $tmp = Join-Path $env:TEMP "xl1-panel-$PID.mjs"
-    Set-Content -Path $tmp -Value $m.Groups[1].Value -Encoding UTF8
-    & node --check $tmp 2>$null
-    if ($LASTEXITCODE -eq 0) { Ok 'index.html inline script parses' } else { Bad 'index.html inline script does not parse' }
-    Remove-Item $tmp -Force -ErrorAction SilentlyContinue
-  } else { Bad 'index.html has no inline script' }
+  foreach ($page in @('index.html', 'public.html')) {
+    $path = Join-Path $Root "dashboard\$page"
+    if (-not (Test-Path $path)) { Bad "$page -- missing"; continue }
+    $html = (Get-Content $path -Raw)
+    $m = [regex]::Match($html, '(?s)<script>(.*)</script>')
+    if ($m.Success) {
+      $tmp = Join-Path $env:TEMP "xl1-panel-$PID.mjs"
+      Set-Content -Path $tmp -Value $m.Groups[1].Value -Encoding UTF8
+      & node --check $tmp 2>$null
+      if ($LASTEXITCODE -eq 0) { Ok "$page inline script parses" } else { Bad "$page inline script does not parse" }
+      Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    } else { Bad "$page has no inline script" }
+  }
 }
 
 # ------------------------------------------------------------ compose wiring
