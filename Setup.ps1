@@ -271,7 +271,15 @@ elseif (-not $SkipTask) {
   # today's confidence.
   $pubTask   = 'XL1 Publisher'
   $pubScript = Join-Path $Root 'scripts\xl1-publish.ps1'
-  if (Test-Path $pubScript) {
+  # Only when there is actually somewhere to publish to. This used to register
+  # the task whenever the script existed, which meant a node with no destination
+  # ran a publisher every five minutes that did nothing -- and a node whose
+  # destination had been RETIRED went on publishing to it, reporting success the
+  # whole time. That is how the public Windows page sat an hour stale while the
+  # task said State Ready, LastTaskResult 0.
+  $pubConfigured = (Test-Path $publishEnv) -and
+                   (Select-String -Path $publishEnv -Pattern '^XL1_PUBLISH_REPO=\s*\S' -Quiet)
+  if ((Test-Path $pubScript) -and $pubConfigured) {
     $pubArgs   = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $pubScript + '"'
     $pubAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $pubArgs
     $pNow  = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(3) `
@@ -283,14 +291,24 @@ elseif (-not $SkipTask) {
         -Settings $settings -RunLevel Highest -Force | Out-Null
       Start-ScheduledTask -TaskName $pubTask
       Say 'registered and started "XL1 Publisher" (every 5m)' 'Green'
-      if (-not (Test-Path $publishEnv) -or
-          -not (Select-String -Path $publishEnv -Pattern '^XL1_PUBLISH_REPO=\s*\S' -Quiet)) {
-        Say 'it publishes nothing until XL1_PUBLISH_REPO is set in config\publish.env' 'Gray'
-      }
     }
     catch {
       Say "could not register the publisher task: $($_.Exception.Message)" 'Yellow'
       Say "  powershell -File `"$pubScript`"" 'Yellow'
+    }
+  }
+  elseif (Test-Path $pubScript) {
+    # No destination, so no task -- and remove one left over from when there
+    # was, rather than leaving it running against a repository nobody serves.
+    if (Get-ScheduledTask -TaskName $pubTask -ErrorAction SilentlyContinue) {
+      try {
+        Unregister-ScheduledTask -TaskName $pubTask -Confirm:$false -ErrorAction Stop
+        Say 'removed "XL1 Publisher" -- config\publish.env names no repository' 'Green'
+      }
+      catch { Say "could not remove the old publisher task: $($_.Exception.Message)" 'Yellow' }
+    }
+    else {
+      Say 'no XL1_PUBLISH_REPO in config\publish.env -- standalone publisher not registered' 'Gray'
     }
   }
 
