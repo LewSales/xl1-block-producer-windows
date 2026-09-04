@@ -293,6 +293,43 @@ elseif (-not $SkipTask) {
       Say "  powershell -File `"$pubScript`"" 'Yellow'
     }
   }
+
+  # The winlew.co site data. A second destination, not a replacement: the task
+  # above keeps feeding the standalone status repo, and this one writes
+  # windows.json into the site repo beside the Pi's file. One script, two
+  # configs, selected with -Config, so the two cannot drift apart in behaviour.
+  #
+  # This had no task at all. The config existed and was only ever run by hand --
+  # exactly the "updates when somebody remembers" failure the comment above
+  # warns about. The public page sat an hour stale announcing that the node had
+  # stopped publishing, while the node was healthy and winning blocks.
+  $siteTask = 'XL1 Site Publisher'
+  $siteEnv  = Join-Path $Root 'config\publish-site.env'
+  if ((Test-Path $pubScript) -and (Test-Path $siteEnv)) {
+    $siteArgs   = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' +
+                  $pubScript + '" -Config "' + $siteEnv + '"'
+    $siteAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $siteArgs
+    # Offset from the other publisher rather than firing alongside it: both read
+    # the same dashboard, and there is no reason to ask it for the same document
+    # twice in the same second.
+    $sNow  = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(4) `
+               -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration $forever
+    $sBoot = New-ScheduledTaskTrigger -AtStartup
+    try {
+      Unregister-ScheduledTask -TaskName $siteTask -Confirm:$false -ErrorAction SilentlyContinue
+      # -ErrorAction Stop, because Register-ScheduledTask reports "Access is
+      # denied" as a NON-terminating error: without it the catch never runs and
+      # the script cheerfully says it registered a task that does not exist.
+      Register-ScheduledTask -TaskName $siteTask -Action $siteAction -Trigger @($sNow, $sBoot) `
+        -Settings $settings -RunLevel Highest -Force -ErrorAction Stop | Out-Null
+      Start-ScheduledTask -TaskName $siteTask
+      Say 'registered and started "XL1 Site Publisher" (every 5m)' 'Green'
+    }
+    catch {
+      Say "could not register the site publisher task: $($_.Exception.Message)" 'Yellow'
+      Say "  powershell -File `"$pubScript`" -Config `"$siteEnv`"" 'Yellow'
+    }
+  }
 }
 
 Head 'Next'

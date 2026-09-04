@@ -19,7 +19,7 @@
   .\xl1-publish.ps1 -DryRun    fetch and write locally, push nothing
 #>
 [CmdletBinding()]
-param([switch]$DryRun)
+param([switch]$DryRun, [string]$Config)
 
 # Not Stop. A publisher that throws leaves a half-written working copy, and the
 # next run inherits it. Every failure below is caught and reported instead.
@@ -27,7 +27,13 @@ $ErrorActionPreference = 'Continue'
 $ProgressPreference    = 'SilentlyContinue'
 
 $Root    = Split-Path -Parent $PSScriptRoot
-$EnvFile = if ($env:XL1_PUBLISH_ENV) { $env:XL1_PUBLISH_ENV } else { Join-Path $Root 'config\publish.env' }
+# One script, several destinations. -Config names one directly, which is what a
+# scheduled task needs: a task cannot set an environment variable for its own
+# action, and quoting a -Command that does is its own small nightmare.
+$EnvFile =
+  if ($Config)                  { $Config }
+  elseif ($env:XL1_PUBLISH_ENV) { $env:XL1_PUBLISH_ENV }
+  else                          { Join-Path $Root 'config\publish.env' }
 
 function Import-EnvFile {
   param([string]$Path)
