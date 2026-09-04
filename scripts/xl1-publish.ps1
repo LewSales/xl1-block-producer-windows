@@ -58,6 +58,23 @@ if ((Test-Path $EnvFile) -and -not (Get-Content -Path $EnvFile -TotalCount 1 -Er
   }
 }
 $cfg = Import-EnvFile $EnvFile
+
+# Setting falls back to the default when a value is empty, because an env line
+# reading FOO= is almost always somebody leaving a field blank rather than
+# choosing "". For a few variables empty IS the choice -- server.mjs carries the
+# same note about DASH_TOKEN -- and the page path is one of them: empty means
+# "this destination already owns its pages, do not write one".
+#
+# Without the distinction it fell back to the default, and the node wrote a
+# second copy of the producer page into the data directory, where nothing
+# served it and it would have gone quietly stale beside live data.
+function SettingOptional { param([string]$Name, $Default = '')
+  $e = [Environment]::GetEnvironmentVariable($Name)
+  if ($e) { return $e }
+  if ($cfg.ContainsKey($Name)) { return $cfg[$Name] }
+  return $Default
+}
+
 function Setting { param([string]$Name, $Default = '')
   $e = [Environment]::GetEnvironmentVariable($Name)
   if ($e) { return $e }
@@ -71,6 +88,13 @@ $Repo    = Setting 'XL1_PUBLISH_REPO' ''
 $Branch  = Setting 'XL1_PUBLISH_BRANCH' 'main'
 $SubPath = Setting 'XL1_PUBLISH_PATH' 'xl1/windows'
 $WorkDir = Setting 'XL1_PUBLISH_WORKDIR' (Join-Path $Root 'state\publish')
+# The file this node writes. One repository can hold several nodes' data when
+# each writes its own name -- which is what lets the site own every page while
+# the nodes own only what they measure.
+$DataFile = Setting 'XL1_PUBLISH_FILE' 'status.json'
+# The page to publish beside it. Empty means the destination already has its own
+# page and this node has no business overwriting it.
+$PagePath = SettingOptional 'XL1_PUBLISH_PAGE' (Join-Path $Root 'dashboard\public.html')
 $Name    = Setting 'XL1_PUBLISH_GIT_NAME' 'xl1-publisher'
 $Email   = Setting 'XL1_PUBLISH_GIT_EMAIL' 'xl1-publisher@users.noreply.github.com'
 
@@ -137,12 +161,12 @@ try {
   # a BOM makes the document unparseable to JSON.parse in the browser -- the
   # same trap the collector and the alerter each carry a note about.
   $enc = New-Object System.Text.UTF8Encoding($false)
-  [System.IO.File]::WriteAllText((Join-Path $dest 'status.json'), $text, $enc)
+  [System.IO.File]::WriteAllText((Join-Path $dest $DataFile), $text, $enc)
 
   # The page travels with the data so a page fix reaches the site on the next
   # publish, rather than needing somebody to remember to copy it.
-  $page = Join-Path $Root 'dashboard\public.html'
-  if (Test-Path $page) {
+  $page = $PagePath
+  if ($page -and (Test-Path $page)) {
     $html = [System.IO.File]::ReadAllText($page)
     # Point the page at the live endpoint, if there is one. A literal swap of one
     # line, so the page in the repository stays the readable default and nothing
