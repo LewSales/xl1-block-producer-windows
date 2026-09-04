@@ -433,3 +433,47 @@ $body = ($next.Keys | ForEach-Object { "$_`t$($next[$_])" }) -join "`n"
 $tmp = "$StateFile.tmp"
 Set-Content -Path $tmp -Value $body -NoNewline
 Move-Item -Path $tmp -Destination $StateFile -Force
+
+# --------------------------------------------------------------- what is armed
+#
+# Which channels are configured, so the dashboard can say so. The state file
+# next to this one says what is FIRING, and that is a different question from
+# whether anything is listening -- an alerter with every channel blank writes an
+# empty state file on every run and looks exactly like a quiet, healthy node.
+#
+# Names only. No URL, no topic, no password: this file sits in the state
+# directory the dashboard mounts, and the dashboard has no business holding a
+# credential it does not need.
+$channels = @()
+if ($NtfyTopic) { $channels += 'ntfy' }
+if ($Webhook)   { $channels += 'webhook' }
+if ($Email -and $SmtpServer) { $channels += 'email' }
+
+$statusDoc = [ordered]@{
+  node = $NodeName
+  ranAt = (Get-Date).ToUniversalTime().ToString('o')
+  channels = $channels
+  # The one that catches this machine ceasing to exist. Called out separately
+  # because it is the only check here that keeps working when nothing else can,
+  # and because an operator who has set up three channels and skipped this one
+  # has covered every failure except the total ones.
+  deadman = [bool]$DeadmanUrl
+  cooldownSeconds = $Cooldown
+  stallBlocks = $StallBlocks
+  launchGraceSeconds = $LaunchGrace
+}
+try {
+  $statusFile = Join-Path (Split-Path -Parent $StateFile) '.alert-status'
+  $json = $statusDoc | ConvertTo-Json -Compress
+  # Not Set-Content -Encoding UTF8: in PowerShell 5.1 that means "UTF-8 WITH
+  # BOM", and a BOM makes the document unparseable to JSON.parse. xl1-collect
+  # carries the same note over the same trap, having been caught by it once.
+  [System.IO.File]::WriteAllText("$statusFile.tmp", $json, (New-Object System.Text.UTF8Encoding($false)))
+  Move-Item -Path "$statusFile.tmp" -Destination $statusFile -Force
+}
+catch {
+  # Advisory only. A dashboard that cannot read this shows one row less; an
+  # alerter that died writing it would be a monitoring tool defeated by its own
+  # telemetry.
+  Write-AlertLog "could not write .alert-status: $($_.Exception.Message)"
+}

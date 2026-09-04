@@ -1,0 +1,24 @@
+# Publish the dashboard on a second address, in addition to loopback.
+#
+# The reason this exists is the fleet card: another node cannot read this one's
+# /api/status while it is bound to 127.0.0.1, and one machine reading another's
+# summary is the whole feature. Compose appends `ports` across files, so this
+# ADDS a binding rather than replacing the loopback one -- everything local
+# keeps working exactly as before.
+#
+#   # .env beside dashboard.yml
+#   DASH_PUBLISH_HOST=100.113.183.126        # this host's tailnet address
+#
+#   docker compose -f dashboard.yml -f compose/dashboard-tailnet.yml up -d
+#
+# Use the tailnet address specifically, never 0.0.0.0. One exposes the page to
+# machines you own; the other exposes it to every network this host is attached
+# to, and the page shows a producer's address, balance and logs. If the tailnet
+# is not private enough for that, set DASH_TOKEN in dashboard.env as well.
+
+name: xl1-dashboard
+
+services:
+  dashboard:
+    ports:
+      - "${DASH_PUBLISH_HOST:?set DASH_PUBLISH_HOST in .env to this host's tailnet address}:8088:8088"

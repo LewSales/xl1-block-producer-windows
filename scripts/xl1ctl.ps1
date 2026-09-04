@@ -29,6 +29,20 @@ $Tuning      = Join-Path $Root 'compose\producer-tuning.yml'
 $Preset      = Join-Path $Root 'presets\roles\producer.json'
 $PresetRest  = Join-Path $Root 'presets\roles\producer-rest.json'
 $DashCompose = Join-Path $Root 'dashboard.yml'
+
+# The dashboard is published on loopback by dashboard.yml, and on a second
+# address by an override file when the operator has asked for one. Worked out
+# here rather than remembered by hand: a `restart` that forgot the override
+# would quietly unpublish the tailnet binding, and the only symptom would be the
+# OTHER node's fleet card going grey some minutes later -- on a machine nobody
+# was touching.
+$DashTailnet = Join-Path $Root 'compose\dashboard-tailnet.yml'
+$DashFiles = @('-f', $DashCompose)
+$DotEnv = Join-Path $Root '.env'
+if ((Test-Path $DashTailnet) -and (Test-Path $DotEnv) -and
+    (Select-String -Path $DotEnv -Pattern '^\s*DASH_PUBLISH_HOST\s*=\s*\S' -Quiet)) {
+  $DashFiles += @('-f', $DashTailnet)
+}
 $ProducerEnv = Join-Path $Root 'config\sequence-producer.env'
 $Api         = 'http://127.0.0.1:8088/api/status'
 
@@ -124,7 +138,7 @@ switch ($Command) {
       Say 'dashboard mounts were made from WSL -- recreating from Windows paths' 'Yellow'
       $dashUp = @('up', '-d', '--force-recreate')
     }
-    & docker compose -f $DashCompose @dashUp
+    & docker compose @DashFiles @dashUp
     Say 'producer and dashboard started' 'Green'
     Say 'dashboard: http://127.0.0.1:8088'
   }
@@ -137,7 +151,7 @@ switch ($Command) {
     $env:XL1_PRODUCER_PRESET = $Preset
     $env:XL1_PRODUCER_PRESET_REST = $PresetRest
     & docker compose -f $Upstream -f $Tuning --profile preset stop preset
-    & docker compose -f $DashCompose stop
+    & docker compose @DashFiles stop
     Say 'stopped' 'Green'
   }
 
@@ -150,7 +164,7 @@ switch ($Command) {
     # failure the dashboard's own error message tells people to run this for.
     # The dashboard keeps nothing in the container worth preserving; its history
     # is in state\dashboard, on the host side of that mount.
-    & docker compose -f $DashCompose up -d --force-recreate
+    & docker compose @DashFiles up -d --force-recreate
     Say 'restarted' 'Green'
   }
 
