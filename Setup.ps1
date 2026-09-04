@@ -348,6 +348,34 @@ elseif (-not $SkipTask) {
       Say "  powershell -File `"$pubScript`" -Config `"$siteEnv`"" 'Yellow'
     }
   }
+
+  # GeoHackers, if this machine is also running that bot. Same publisher, a
+  # third config, reading the bot's API instead of the dashboard. Registered
+  # only when the config exists, so a node that does not run GeoHackers never
+  # sees a task for it.
+  $ghTask = 'XL1 GeoHackers Publisher'
+  $ghEnv  = Join-Path $Root 'config\publish-geohackers.env'
+  if ((Test-Path $pubScript) -and (Test-Path $ghEnv)) {
+    $ghArgs   = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' +
+                $pubScript + '" -Config "' + $ghEnv + '"'
+    $ghAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $ghArgs
+    # Ten minutes, not five. The bot's counts move when somebody runs a command,
+    # not on a timer, so polling it as often as the chain buys nothing.
+    $gNow  = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(5) `
+               -RepetitionInterval (New-TimeSpan -Minutes 10) -RepetitionDuration $forever
+    $gBoot = New-ScheduledTaskTrigger -AtStartup
+    try {
+      Unregister-ScheduledTask -TaskName $ghTask -Confirm:$false -ErrorAction SilentlyContinue
+      Register-ScheduledTask -TaskName $ghTask -Action $ghAction -Trigger @($gNow, $gBoot) `
+        -Settings $settings -RunLevel Highest -Force -ErrorAction Stop | Out-Null
+      Start-ScheduledTask -TaskName $ghTask
+      Say 'registered and started "XL1 GeoHackers Publisher" (every 10m)' 'Green'
+    }
+    catch {
+      Say "could not register the geohackers publisher task: $($_.Exception.Message)" 'Yellow'
+      Say "  powershell -File `"$pubScript`" -Config `"$ghEnv`"" 'Yellow'
+    }
+  }
 }
 
 Head 'Next'
