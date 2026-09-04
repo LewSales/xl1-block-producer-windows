@@ -46,6 +46,17 @@ function Import-EnvFile {
   }
   return $map
 }
+# A config file that exists and cannot be read is a different fault from one
+# that was never written. Left alone they look identical -- every setting stays
+# at its default and the script reports "nothing to publish to" and exits 0,
+# which is a silent failure wearing the costume of a healthy no-op.
+if ((Test-Path $EnvFile) -and -not (Get-Content -Path $EnvFile -TotalCount 1 -ErrorAction SilentlyContinue)) {
+  $probe = $null
+  try { $probe = Get-Content -Path $EnvFile -TotalCount 1 -ErrorAction Stop } catch {
+    Write-Warning "xl1-publish: $EnvFile exists but cannot be read -- $($_.Exception.Message)"
+    exit 1
+  }
+}
 $cfg = Import-EnvFile $EnvFile
 function Setting { param([string]$Name, $Default = '')
   $e = [Environment]::GetEnvironmentVariable($Name)
@@ -62,6 +73,16 @@ $SubPath = Setting 'XL1_PUBLISH_PATH' 'xl1/windows'
 $WorkDir = Setting 'XL1_PUBLISH_WORKDIR' (Join-Path $Root 'state\publish')
 $Name    = Setting 'XL1_PUBLISH_GIT_NAME' 'xl1-publisher'
 $Email   = Setting 'XL1_PUBLISH_GIT_EMAIL' 'xl1-publisher@users.noreply.github.com'
+
+# Optional: a URL that accepts the status document directly -- object storage, a
+# Worker, anything that takes an HTTP PUT. Git ships the PAGE well, because a
+# page is reviewed and versioned and changes rarely. It ships the DATA badly:
+# every publish becomes a commit, a build and a CDN propagation, and the number
+# on screen is minutes behind the node that produced it. When this is set the
+# data goes straight there and the page reads it live.
+$LiveUrl    = Setting 'XL1_PUBLISH_LIVE_URL' ''
+$LiveAuth   = Setting 'XL1_PUBLISH_LIVE_AUTH' ''
+$LiveMethod = Setting 'XL1_PUBLISH_LIVE_METHOD' 'PUT'
 
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
 
@@ -121,7 +142,30 @@ try {
   # The page travels with the data so a page fix reaches the site on the next
   # publish, rather than needing somebody to remember to copy it.
   $page = Join-Path $Root 'dashboard\public.html'
-  if (Test-Path $page) { Copy-Item -Force $page (Join-Path $dest 'index.html') }
+  if (Test-Path $page) {
+    $html = [System.IO.File]::ReadAllText($page)
+    # Point the page at the live endpoint, if there is one. A literal swap of one
+    # line, so the page in the repository stays the readable default and nothing
+    # has to be templated.
+    if ($LiveUrl) { $html = $html.Replace("const DATA_URL = 'status.json'", "const DATA_URL = '$LiveUrl'") }
+    [System.IO.File]::WriteAllText((Join-Path $dest 'index.html'), $html, (New-Object System.Text.UTF8Encoding($false)))
+  }
+
+  # Straight to the live endpoint, before the git push: this is the copy people
+  # actually read, and it should not wait on a commit.
+  if ($LiveUrl -and -not $DryRun) {
+    try {
+      $headers = @{ 'content-type' = 'application/json' }
+      if ($LiveAuth) { $headers['authorization'] = $LiveAuth }
+      Invoke-WebRequest -Uri $LiveUrl -Method $LiveMethod -Headers $headers `
+        -Body ([Text.Encoding]::UTF8.GetBytes($text)) -TimeoutSec 20 -UseBasicParsing | Out-Null
+      Log 'live endpoint updated'
+    } catch {
+      # Never fatal. The git copy below is the fallback, and a page that is a few
+      # minutes stale beats a publisher that gave up.
+      Log "live endpoint failed -- $($_.Exception.Message)"
+    }
+  }
 
   if ($DryRun) { Log "dry run: wrote $dest (nothing pushed)"; exit 0 }
 
@@ -130,7 +174,11 @@ try {
   if ($LASTEXITCODE -eq 0) { Log 'no change since the last publish'; exit 0 }
 
   $stamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss') + 'Z'
-  & git commit --quiet -m "$SubPath at $stamp" 2>&1 | Out-Null
+  # The node's own name for itself, taken from the payload rather than from
+  # configuration -- a history of "." tells a reader nothing about which machine
+  # wrote it, and the path is "." whenever a repo holds a single node.
+  $who = if ($doc.label) { $doc.label } elseif ($SubPath -ne '.') { $SubPath } else { 'status' }
+  & git commit --quiet -m "$who at $stamp" 2>&1 | Out-Null
 
   # Two nodes push to one repository. Each writes only its own directory, so a
   # rebase can never conflict -- but it can still be rejected for being behind,
@@ -147,6 +195,6 @@ try {
       exit 1
     }
   }
-  if ($pushed) { Log "published $SubPath" } else { Log 'push rejected three times -- giving up until the next run'; exit 1 }
+  if ($pushed) { Log "published $who" } else { Log 'push rejected three times -- giving up until the next run'; exit 1 }
 }
 finally { Pop-Location }

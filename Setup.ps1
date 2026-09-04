@@ -126,6 +126,13 @@ else {
 # Every channel in it is empty, so the alerter runs and delivers nothing until
 # an operator fills one in. Created anyway: a file that exists gets edited, and
 # one that has to be found first does not.
+$publishEnv = Join-Path $cfg 'publish.env'
+if (Test-Path $publishEnv) { Say 'config\publish.env already exists -- left untouched' }
+elseif (Test-Path (Join-Path $cfg 'publish.env.template')) {
+  Copy-Item (Join-Path $cfg 'publish.env.template') $publishEnv
+  Say 'created config\publish.env' 'Green'
+}
+
 $alertEnv = Join-Path $cfg 'alert.env'
 if (Test-Path $alertEnv) { Say 'config\alert.env already exists -- left untouched' }
 else {
@@ -241,6 +248,32 @@ elseif (-not $SkipTask) {
   catch {
     Say "could not register the alerter task: $($_.Exception.Message)" 'Yellow'
     Say "  powershell -File `"$alertScript`"" 'Yellow'
+  }
+
+  # The public page. Registered here rather than left as a snippet to paste,
+  # because a page nobody scheduled is one that updates when somebody remembers
+  # -- and a stale status page is worse than none, reporting yesterday with
+  # today's confidence.
+  $pubTask   = 'XL1 Publisher'
+  $pubScript = Join-Path $Root 'scripts\xl1-publish.ps1'
+  if (Test-Path $pubScript) {
+    $pubArgs   = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $pubScript + '"'
+    $pubAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $pubArgs
+    $pNow  = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(3) `
+               -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration $forever
+    $pBoot = New-ScheduledTaskTrigger -AtStartup
+    try {
+      Unregister-ScheduledTask -TaskName $pubTask -Confirm:$false -ErrorAction SilentlyContinue
+      Register-ScheduledTask -TaskName $pubTask -Action $pubAction -Trigger @($pNow, $pBoot) `
+        -Settings $settings -RunLevel Highest -Force | Out-Null
+      Start-ScheduledTask -TaskName $pubTask
+      Say 'registered and started "XL1 Publisher" (every 5m)' 'Green'
+      Say 'it publishes nothing until XL1_PUBLISH_REPO is set in config\publish.env' 'Gray'
+    }
+    catch {
+      Say "could not register the publisher task: $($_.Exception.Message)" 'Yellow'
+      Say "  powershell -File `"$pubScript`"" 'Yellow'
+    }
   }
 }
 
