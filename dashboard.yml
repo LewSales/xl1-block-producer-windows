@@ -44,6 +44,12 @@ services:
       # which is a strange price for letting one other node read it.
       - "127.0.0.1:8088:8088"
 
+    volumes:
+      # Written by scripts/xl1-collect.ps1 on the Windows side. The dashboard
+      # never gets the Docker socket — the same reasoning as on the Pi, and it
+      # matters more here, where the socket is a Windows-wide root equivalent.
+      - ./state:/var/lib/xl1
+
     extra_hosts:
       - "host.docker.internal:host-gateway"
     read_only: true

@@ -77,6 +77,31 @@ if (-not $node) {
   } else { Bad 'index.html has no inline script' }
 }
 
+# ------------------------------------------------------------ compose wiring
+#
+# The dashboard keeps everything it knows in the bind-mounted state directory:
+# the collector's snapshot, the standings tally, thirty days of trend, and the
+# alerter's state. A compose file that has lost that mount still starts, still
+# passes a health check, and still serves a page -- one that has silently
+# forgotten every number on it and begins re-scanning the chain from nothing.
+#
+# That is exactly what an edit to the ports block did here once, by replacing
+# the lines between `ports:` and `extra_hosts:` -- which is where `volumes:`
+# happened to live. It reached a commit. This is the guard.
+Step 'Compose wiring'
+$dashYml = Join-Path $Root 'dashboard.yml'
+if (-not (Test-Path $dashYml)) { Bad 'dashboard.yml -- missing' }
+else {
+  $yml = Get-Content $dashYml -Raw
+  foreach ($needle in @(
+    @{ pattern = './state:/var/lib/xl1'; what = 'the state directory is bind-mounted' },
+    @{ pattern = '127.0.0.1:8088:8088';  what = 'the dashboard is published on loopback' }
+  )) {
+    if ($yml -match [regex]::Escape($needle.pattern)) { Ok $needle.what }
+    else { Bad "dashboard.yml -- $($needle.what) is gone" }
+  }
+}
+
 # ----------------------------------------------------------------- attribution
 #
 # Someone shown a screenshot of this should not come away thinking XYO shipped
