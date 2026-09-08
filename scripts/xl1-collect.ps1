@@ -392,6 +392,78 @@ $doc.recentLog = @(
       } else { $_ }
     }
 )
+# ------------------------------------------------------------------ os updates
+#
+# The same three figures the Pi reports, so one dashboard card reads both nodes.
+# Windows had none of this, which is worse than it sounds: the Pi spent nine days
+# reporting "0 updates" off stale lists and the staleness figure is what exposed
+# it. A node that reports nothing cannot be caught that way at all.
+#
+# The count is only meaningful next to the age of the scan that produced it, so
+# both are emitted or neither is.
+$osCache = Join-Path $StateDir '.os-updates'
+# 6h normally, 15m while something is pending -- the same cadence as the Pi. A
+# host that was just patched should say so within minutes, not at the end of a
+# six-hour cache.
+$osPending = $false
+if (Test-Path $osCache) {
+  $prev = (Get-Content $osCache -Raw) -split "`t"
+  $osPending = ($prev[0] -ne '0') -or ($prev[2] -eq 'True')
+}
+$osInterval = if ($osPending) { 900 } else { 21600 }
+
+if ((Get-CacheAge $osCache) -gt $osInterval) {
+  try {
+    # Searching is slow and hits the network, which is why it happens on a long
+    # cache rather than every collector run.
+    $searcher = (New-Object -ComObject Microsoft.Update.Session).CreateUpdateSearcher()
+    $found    = $searcher.Search('IsInstalled=0 and IsHidden=0').Updates
+    $total    = @($found).Count
+    # Severity is set on security updates and empty on drivers and feature
+    # updates, which is the distinction worth surfacing on a producing node.
+    $sec      = @($found | Where-Object { $_.MsrcSeverity }).Count
+
+    # Any one of these means a reboot is owed. Checked together because Windows
+    # records them in different places depending on what asked for it.
+    $rebootKeys = @(
+      'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending',
+      'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired'
+    )
+    $reboot = [bool](@($rebootKeys | Where-Object { Test-Path $_ }).Count)
+
+    Set-Content -Path $osCache -Value "$total`t$sec`t$reboot" -NoNewline
+  } catch {
+    # A failed search must not overwrite a good previous answer with a zero.
+    # "0 updates" read off a search that never ran is the exact failure this is
+    # here to prevent.
+    if (-not (Test-Path $osCache)) { Set-Content -Path $osCache -Value "`t`t" -NoNewline }
+  }
+}
+
+if (Test-Path $osCache) {
+  $u, $sv, $rb = (Get-Content $osCache -Raw) -split "`t"
+  if ($u -ne '') {
+    $os = [ordered]@{
+      updates          = [int]$u
+      securityUpdates  = [int]$sv
+      rebootRequired   = ($rb -eq 'True')
+    }
+    # How old the scan behind those numbers is.
+    #
+    # Taken from the cache file's own timestamp, not from the registry: the
+    # Results\Detect key modern Windows is supposed to write does not exist on
+    # this host, and an age that is silently absent is worse than none -- the
+    # dashboard's staleness check simply never fires and a stale zero looks
+    # exactly like a fresh one.
+    #
+    # The file is only rewritten when a search SUCCEEDS, so this is the age of
+    # the last good answer. A host that has failed to search for a week reports
+    # a week, which is the number that matters.
+    $os.updatesAgeHours = [math]::Round((Get-CacheAge $osCache) / 3600, 1)
+    $doc.os = $os
+  }
+}
+
 $doc.host = Get-HostMetrics
 
 # Validate before publishing, so the dashboard never reads a half-written file.
