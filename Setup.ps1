@@ -14,7 +14,10 @@
 #>
 [CmdletBinding()]
 param(
-  [string]$CliVersion = '5.3.1',
+  # Kept in step with Build.ps1's own default. These drifted -- Setup said 5.3.1
+  # while Build said 5.3.2 -- so running Setup.ps1 quietly built an OLDER cli
+  # than running Build.ps1 by hand, and neither said so.
+  [string]$CliVersion = '5.3.2',
   [switch]$SkipBuild,
   [switch]$SkipTask
 )
@@ -374,6 +377,34 @@ elseif (-not $SkipTask) {
     catch {
       Say "could not register the geohackers publisher task: $($_.Exception.Message)" 'Yellow'
       Say "  powershell -File `"$pubScript`" -Config `"$ghEnv`"" 'Yellow'
+    }
+  }
+
+  # Auto-update. Reads the same /xl1/latest.json the Pi and the WinLEW APK read,
+  # and rebuilds only when a newer xl1-cli has actually shipped.
+  #
+  # 72h, offset from the hour, and NOT at startup: a machine that has just come
+  # back is the worst moment to start a build and recreate the producer.
+  $updTask   = 'XL1 Auto Update'
+  $updScript = Join-Path $Root 'scripts\xl1-autoupdate.ps1'
+  if (Test-Path $updScript) {
+    $updArgs   = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $updScript + '"'
+    $updAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $updArgs
+    $uNow = New-ScheduledTaskTrigger -Once -At (Get-Date).Date.AddDays(1).AddHours(4) `
+              -RepetitionInterval (New-TimeSpan -Hours 72) -RepetitionDuration $forever
+    try {
+      Unregister-ScheduledTask -TaskName $updTask -Confirm:$false -ErrorAction SilentlyContinue
+      # A build and two container recreates need more than the 5 minutes the
+      # other tasks get.
+      $updSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+                       -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 60)
+      Register-ScheduledTask -TaskName $updTask -Action $updAction -Trigger $uNow `
+        -Settings $updSettings -RunLevel Highest -Force -ErrorAction Stop | Out-Null
+      Say 'registered "XL1 Auto Update" (every 72h)' 'Green'
+    }
+    catch {
+      Say "could not register the auto-update task: $($_.Exception.Message)" 'Yellow'
+      Say "  powershell -File `"$updScript`" -Check" 'Yellow'
     }
   }
 }
