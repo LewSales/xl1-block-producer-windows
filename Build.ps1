@@ -70,6 +70,15 @@ if (-not $DashboardOnly) {
 
   # Their Dockerfile COPYs dist/node, which is produced by a pnpm compile. Doing
   # that in a container keeps Node and pnpm off the Windows side entirely.
+  #
+  # dist/ is gitignored in their repo, so Setup.ps1's `git reset --hard` on a
+  # later run leaves a stale dist/ untouched even as it updates every tracked
+  # file. Without this, a rebuild after picking up a newer upstream commit would
+  # keep the old compiled entrypoint under a new Dockerfile and a new xl1-cli
+  # label -- the node runs and looks healthy, but its candidates get pruned
+  # because the compiled logic no longer matches what that version's label
+  # claims. Wiping it here means every build recompiles, every time.
+  Remove-Item -Recurse -Force (Join-Path $Upstream 'dist') -ErrorAction SilentlyContinue
   if (-not (Test-Path (Join-Path $Upstream 'dist\node\entrypoint.mjs'))) {
     Say 'compiling the entrypoint (in a container -- no Node needed on Windows)'
     $img = 'node:' + $NodeVersion + '-bookworm-slim'
