@@ -75,9 +75,19 @@ if ((-not (Test-Path $SchemaStamp)) -or ((Get-Content $SchemaStamp -Raw).Trim() 
   Set-Content -Path $SchemaStamp -Value $CacheSchema -NoNewline
 }
 
-if (-not $Container) {
+# `docker ps --filter name=preset` only ever needs to run again when the
+# producer container is actually recreated under a new preset index -- an
+# operator-driven event, not a per-cycle one -- so the resolved name is cached
+# and only re-derived below if the inspect that follows fails against it.
+$autoResolved = -not $Container
+function Resolve-ProducerContainer {
   $found = (Invoke-Docker ps -a --filter 'name=preset' --format '{{.Names}}' | Select-Object -First 1)
-  $Container = if ($found) { $found } else { 'xl1-node-preset-1' }
+  if ($found) { $found } else { 'xl1-node-preset-1' }
+}
+$containerCacheFile = Join-Path $StateDir '.container-name'
+if ($autoResolved) {
+  $Container = if (Test-Path $containerCacheFile) { (Get-Content $containerCacheFile -Raw).Trim() } else { '' }
+  if (-not $Container) { $Container = Resolve-ProducerContainer }
 }
 
 $collectedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
@@ -120,8 +130,19 @@ function Get-HostMetrics {
 # ------------------------------------------------------------------- container
 $doc = [ordered]@{ collectedAt = $collectedAt }
 
-$inspect = Invoke-Docker inspect $Container --format `
-  '{{.State.Status}}|{{.State.Running}}|{{.State.StartedAt}}|{{.RestartCount}}|{{.Config.Image}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{.Image}}' 2>$null
+$inspectFormat = '{{.State.Status}}|{{.State.Running}}|{{.State.StartedAt}}|{{.RestartCount}}|{{.Config.Image}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{.Image}}'
+$inspect = Invoke-Docker inspect $Container --format $inspectFormat 2>$null
+
+if (($LASTEXITCODE -ne 0 -or -not $inspect) -and $autoResolved) {
+  # The cached name goes stale exactly once, the cycle the producer container
+  # is recreated under a new preset index -- re-resolve before reporting an
+  # outage that is really just a rename.
+  $reresolved = Resolve-ProducerContainer
+  if ($reresolved -ne $Container) {
+    $Container = $reresolved
+    $inspect = Invoke-Docker inspect $Container --format $inspectFormat 2>$null
+  }
+}
 
 if ($LASTEXITCODE -ne 0 -or -not $inspect) {
   # A container that does not exist is a first-class state, not a missing field.
@@ -132,6 +153,8 @@ if ($LASTEXITCODE -ne 0 -or -not $inspect) {
   Move-Item -Force "$Out.tmp" $Out
   exit 0
 }
+
+if ($autoResolved) { Set-Content -Path $containerCacheFile -Value $Container -NoNewline }
 
 $f = $inspect.Trim() -split '\|'
 $started = [datetime]::Parse($f[2])
@@ -158,8 +181,20 @@ if ($f[1] -eq 'true') { $doc.runSeconds = [int][Math]::Floor($up.TotalSeconds) }
 # ------------------------------------------------------------------------ logs
 $since = Join-Path $StateDir '.collect-cursor'
 $sinceArg = if (Test-Path $since) { (Get-Content $since -Raw).Trim() } else { $null }
-$newLog = if ($sinceArg) { Invoke-Docker logs --since $sinceArg $Container } else { Invoke-Docker logs --tail 2000 $Container }
+# --timestamps here, once, rather than in a second `docker logs` call later
+# purely to stamp the recent-log panel -- that used to cost a second CLI
+# process and Engine API round trip every single cycle, forever.
+$rawNewLog = @(
+  $(if ($sinceArg) { Invoke-Docker logs --timestamps --since $sinceArg $Container } else { Invoke-Docker logs --timestamps --tail 2000 $Container }) |
+    ForEach-Object { "$_" }
+)
 Set-Content -Path $since -Value $collectedAt -NoNewline
+
+# Everything below only ever matched on the message, not the stamp just added
+# above -- strip it back off once here rather than teaching every pattern a
+# second shape.
+$tsPattern = '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z (.*)$'
+$newLog = @($rawNewLog | ForEach-Object { if ($_ -match $tsPattern) { $Matches[1] } else { $_ } })
 
 $counterFile = Join-Path $StateDir '.blocks-published'
 $total = if (Test-Path $counterFile) { [int](Get-Content $counterFile -Raw).Trim() } else { 0 }
@@ -377,20 +412,34 @@ if ($cliVersion) { $doc.cliVersion = $cliVersion }
 # The stamp's own date is carried through the conversion rather than a fixed
 # offset being applied to every line, so the hour stays right either side of a
 # DST boundary.
+#
+# The lines come from a small rolling buffer kept on disk, topped up from
+# $rawNewLog above -- which already carries every line that has arrived since
+# the last cycle, timestamps included -- rather than a second `docker logs
+# --tail` fetch every cycle.
+$logBufferFile = Join-Path $StateDir '.recent-log'
+$bufferedLines = @(if (Test-Path $logBufferFile) { Get-Content $logBufferFile } else { @() })
+$combinedLines = @($bufferedLines + @($rawNewLog | Where-Object { $_.Trim() }))
+if ($combinedLines.Count -lt $LogLines) {
+  # Only reachable right after this buffer is first introduced, right after a
+  # state wipe, or after a quiet spell longer than the buffer's own history --
+  # a cold start earns one extra fetch rather than shipping a half-full panel.
+  $combinedLines = @(Invoke-Docker logs --timestamps --tail $LogLines $Container | ForEach-Object { "$_" } | Where-Object { $_.Trim() })
+}
+$recentLines = @($combinedLines | Select-Object -Last $LogLines)
+Set-Content -Path $logBufferFile -Value $recentLines
+
 $doc.recentLog = @(
-  Invoke-Docker logs --timestamps --tail $LogLines $Container |
-    ForEach-Object { "$_" } |
-    Where-Object { $_.Trim() } |
-    ForEach-Object {
-      # Only lines carrying the docker stamp are rewritten. A wrapped line, or
-      # an error from docker itself, passes through intact.
-      if ($_ -match '^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?Z (.*)$') {
-        $utc = [datetime]::new([int]$Matches[1], [int]$Matches[2], [int]$Matches[3],
-                               [int]$Matches[4], [int]$Matches[5], [int]$Matches[6],
-                               [DateTimeKind]::Utc)
-        '{0:HH:mm:ss} {1}' -f $utc.ToLocalTime(), $Matches[7]
-      } else { $_ }
-    }
+  $recentLines | ForEach-Object {
+    # Only lines carrying the docker stamp are rewritten. A wrapped line, or
+    # an error from docker itself, passes through intact.
+    if ($_ -match '^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?Z (.*)$') {
+      $utc = [datetime]::new([int]$Matches[1], [int]$Matches[2], [int]$Matches[3],
+                             [int]$Matches[4], [int]$Matches[5], [int]$Matches[6],
+                             [DateTimeKind]::Utc)
+      '{0:HH:mm:ss} {1}' -f $utc.ToLocalTime(), $Matches[7]
+    } else { $_ }
+  }
 )
 # ------------------------------------------------------------------ os updates
 #
