@@ -11,12 +11,19 @@
   .\xl1ctl.ps1 status
   .\xl1ctl.ps1 logs -Follow
   .\xl1ctl.ps1 doctor
+  .\xl1ctl.ps1 versions
+  .\xl1ctl.ps1 rollback           # back to whatever the last Build.ps1 replaced
+  .\xl1ctl.ps1 rollback 5.3.1     # or name a version still tagged on this PC
 #>
 [CmdletBinding()]
 param(
   [Parameter(Position = 0)]
-  [ValidateSet('status', 'start', 'stop', 'restart', 'logs', 'addr', 'doctor', 'dashboard', 'backup', 'alert')]
+  [ValidateSet('status', 'start', 'stop', 'restart', 'logs', 'addr', 'doctor', 'dashboard', 'backup', 'alert', 'versions', 'rollback')]
   [string]$Command = 'status',
+  # rollback's optional target, e.g. `.\xl1ctl.ps1 rollback 5.3.1`. Unused by
+  # every other command.
+  [Parameter(Position = 1)]
+  [string]$Target,
   [switch]$Follow,
   [switch]$Test,
   [int]$Lines = 60
@@ -58,6 +65,7 @@ function Assert-Docker {
 }
 
 function Start-Producer {
+  param([switch]$Force)
   # XL1_PRESET_ENV_FILE is resolved relative to the compose file, not the shell.
   $env:XL1_IMAGE = 'xl1:local'
   $env:XL1_PRESET_ENV_FILE = '../../config/sequence-producer.env'
@@ -74,8 +82,15 @@ function Start-Producer {
   # here than on the dashboard: when the shim is gone Docker creates a directory
   # where the file should be, and the node will not start at all. Recreate it
   # from Windows paths once, deliberately, rather than at the next reboot.
-  if (Test-WslBound (Get-ProducerContainer)) {
-    Say 'producer mounts were made from WSL -- recreating from Windows paths' 'Yellow'
+  #
+  # -Force is the caller's own reason to recreate -- rollback passes it because
+  # compose only recreates when the image ID xl1:local resolves to has
+  # changed, and trusting that diff for a command whose entire purpose is
+  # "get off the bad image right now" is a needless way to find out it did not
+  # fire. A few seconds of extra downtime on a deliberate recovery action is
+  # cheap next to that.
+  if ($Force -or (Test-WslBound (Get-ProducerContainer))) {
+    if (-not $Force) { Say 'producer mounts were made from WSL -- recreating from Windows paths' 'Yellow' }
     $up = @('up', '-d', '--force-recreate', 'preset')
   }
   & docker compose -f $Upstream -f $Tuning --profile preset @up
@@ -121,6 +136,57 @@ function Get-ProducerContainer {
   $n = (& docker ps -a --filter 'name=preset' --format '{{.Names}}' | Select-Object -First 1)
   if ($n) { return $n }
   return 'xl1-node-preset-1'
+}
+
+# ------------------------------------------------------------------ versions
+#
+# Build.ps1 tags every image it produces with its own version and, before
+# overwriting xl1:local, tags the outgoing one too -- so rolling back is a
+# retag and a restart, not a rebuild or a redownload with the node already
+# down. Mirrors the Pi's xl1ctl, which exists for the same reason: an update
+# used to be one-way.
+$ProducerVersionLabel = 'org.xyo.xl1-cli.version'
+$RollbackFile = Join-Path $Root 'state\rollback'
+
+# Which xl1-cli does this image carry? The label Build.ps1/upstream's own
+# Dockerfile may stamp answers instantly; the fallback starts a container,
+# which costs a few seconds and is only needed for images built without it.
+function Get-ImageVersion([string]$Ref) {
+  # An inspect of an image that does not exist writes to stderr, which is a
+  # terminating error while EAP is Stop -- same reason Test-WslBound above
+  # flips it. A missing image is an expected answer here, not a fault.
+  $eap = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    & docker image inspect $Ref 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) { return $null }
+    # \" , not a bare ": PowerShell 5.1 hands a native exe's argv a single
+    # reassembled command line, and a literal " inside one argument needs the
+    # C-runtime's own escape (backslash-quote) to survive that trip, not
+    # PowerShell's. A bare " here reached docker.exe as no quote at all, and Go
+    # read the unquoted label name as a call to a function named "org".
+    $fmt = '{{index .Config.Labels \"' + $ProducerVersionLabel + '\"}}'
+    $v = (& docker image inspect -f $fmt $Ref 2>$null)
+    if (-not $v -or $v -eq '<no value>') {
+      $out = (& docker run --rm --entrypoint xl1 $Ref --version 2>$null | Out-String)
+      if ($out -match '(\d+\.\d+\.\d+)') { $v = $Matches[1] } else { $v = $null }
+    }
+    return $v
+  } finally { $ErrorActionPreference = $eap }
+}
+
+# Version-tagged producer images, newest first. Sorted as a version, not
+# lexically, so 5.10.0 does not rank below 5.9.0 the first time a minor
+# reaches double digits.
+function Get-ProducerVersions {
+  @(& docker images xl1 --format '{{.Tag}}' 2>$null |
+    Where-Object { $_ -match '^\d+\.\d+\.\d+$' } | Sort-Object { [version]$_ } -Descending)
+}
+
+function Get-RollbackTarget {
+  if (-not (Test-Path $RollbackFile)) { return $null }
+  $t = (Get-Content $RollbackFile -Raw).Trim()
+  if ($t) { return $t } else { return $null }
 }
 
 switch ($Command) {
@@ -232,6 +298,81 @@ switch ($Command) {
       Say ''
       Say 'Send a test notification with:  .\xl1ctl.ps1 alert -Test' 'Gray'
     }
+  }
+
+  'versions' {
+    Assert-Docker
+    Head 'Producer images on this PC'
+    $current = Get-ImageVersion 'xl1:local'
+    $rollbackTo = Get-RollbackTarget
+    $versions = @(Get-ProducerVersions)
+    if (-not $versions.Count) {
+      Say 'none tagged yet -- the next build will start recording them' 'Gray'
+    }
+    foreach ($v in $versions) {
+      $note = ''; $color = 'Gray'
+      if ($v -eq $current) { $note = 'running now'; $color = 'Green' }
+      elseif ($v -eq $rollbackTo) { $note = 'rollback target' }
+      Say ('{0,-12} {1}' -f $v, $note) $color
+    }
+    Write-Host ''
+    if ($rollbackTo -and $rollbackTo -ne $current) {
+      Say 'Roll back:  .\xl1ctl.ps1 rollback' 'Gray'
+    }
+  }
+
+  'rollback' {
+    Assert-Docker
+    Head 'Rollback'
+    $want = $Target
+    if (-not $want) {
+      $want = Get-RollbackTarget
+      if (-not $want) {
+        throw "no recorded rollback target. Choose by hand:`n    .\xl1ctl.ps1 versions`n    .\xl1ctl.ps1 rollback <version>"
+      }
+    }
+    # Both flip EAP the same way Get-ImageVersion/Test-WslBound do: an inspect
+    # of a tag that does not exist, or a tag command that fails, writes to
+    # stderr, which is a terminating error while EAP is Stop -- and this
+    # function's own throw messages below are the ones worth seeing, not that.
+    $eap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+      & docker image inspect "xl1:$want" 2>$null | Out-Null
+      $found = ($LASTEXITCODE -eq 0)
+    } finally { $ErrorActionPreference = $eap }
+    if (-not $found) {
+      $have = (Get-ProducerVersions) -join ' '
+      throw "xl1:$want is not on this PC. Here: $have`n    Or rebuild it: .\Build.ps1 -CliVersion $want"
+    }
+
+    $current = Get-ImageVersion 'xl1:local'
+    if ($current -and $current -eq $want) {
+      Say ('already running ' + $want + ' -- nothing to do') 'Green'
+      break
+    }
+
+    Say ('{0} -> {1}' -f $(if ($current) { $current } else { 'unknown' }), $want)
+    $eap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & docker tag "xl1:$want" xl1:local 2>$null } finally { $ErrorActionPreference = $eap }
+    if ($LASTEXITCODE -ne 0) { throw "could not retag xl1:local -- nothing was stopped, still on $current" }
+
+    # Swap rather than clear: the version just left is the obvious thing to
+    # roll forward to, so a second rollback undoes a mistaken one.
+    if ($current) {
+      New-Item -ItemType Directory -Force -Path (Split-Path $RollbackFile) | Out-Null
+      Set-Content -Path $RollbackFile -Value $current -NoNewline
+    }
+
+    # -Force: see the comment on Start-Producer for why this does not lean on
+    # compose's own image-changed diff for a recovery command.
+    Start-Producer -Force
+
+    $now = Get-ImageVersion 'xl1:local'
+    Write-Host ''
+    Say ('producer image is now ' + $(if ($now) { $now } else { $want })) 'Green'
+    Say 'Confirm it produces again:  .\xl1ctl.ps1 status'
   }
 
   'doctor' {

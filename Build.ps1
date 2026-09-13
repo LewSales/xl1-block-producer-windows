@@ -31,6 +31,30 @@ function Say  { param($m, $c = 'Gray') Write-Host "  $m" -ForegroundColor $c }
 function Head { param($m) Write-Host ''; Write-Host "==> $m" -ForegroundColor Cyan }
 function Die  { param($m) Write-Host ''; Write-Host "error: $m" -ForegroundColor Red; exit 1 }
 
+# Keep the newest few tagged versions, plus whatever is running and whatever
+# rollback points at, so repeated builds cannot fill Docker Desktop's disk with
+# every version ever built. Removing a tag never removes an image still tagged
+# something else, so this cannot delete xl1:local out from under the producer.
+function Invoke-VersionPrune {
+  param([string]$KeepA, [string]$KeepB, [int]$Keep = 3)
+  # A prune is cleanup, not a build step -- it must never abort the script it
+  # runs at the end of. `docker rmi` on an image still referenced elsewhere (a
+  # stray extra tag, a stopped container) writes to stderr, which is a
+  # terminating error while EAP is Stop; flipped the same way Get-ImageVersion
+  # in xl1ctl.ps1 does, for the same reason.
+  $eap = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $versions = @(& docker images xl1 --format '{{.Tag}}' 2>$null |
+      Where-Object { $_ -match '^\d+\.\d+\.\d+$' } | Sort-Object { [version]$_ } -Descending)
+    for ($i = $Keep; $i -lt $versions.Count; $i++) {
+      $v = $versions[$i]
+      if ($v -eq $KeepA -or $v -eq $KeepB) { continue }
+      & docker rmi "xl1:$v" 2>$null | Out-Null
+    }
+  } finally { $ErrorActionPreference = $eap }
+}
+
 & docker info 2>&1 | Out-Null
 if ($LASTEXITCODE -ne 0) { Die 'Docker Desktop is not running.' }
 
@@ -63,6 +87,29 @@ if (-not $DashboardOnly) {
   }
   else { Say 'entrypoint already compiled' }
 
+  # Name the outgoing image before the build below overwrites xl1:local --
+  # xl1-autoupdate.ps1 already does this before calling here, but a manual run
+  # (this docstring's own example: -CliVersion 5.3.1) did not, so a bad build
+  # left no way back except redownloading or rebuilding the old version from
+  # scratch, over the network, with the node already down.
+  # On the very first build ever, xl1:local does not exist -- docker run then
+  # tries to pull it as a registry image, fails, and writes to stderr, which is
+  # a terminating error while EAP is Stop (script-level, above). None of that
+  # is a fault here; it just means there is nothing yet to keep.
+  $prevVersion = $null
+  $eap = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $prevCheck = (& docker run --rm --platform $Platform --entrypoint xl1 xl1:local --version 2>$null | Out-String)
+    if ($LASTEXITCODE -eq 0 -and $prevCheck -match '(\d+\.\d+\.\d+)') {
+      $prevVersion = $Matches[1]
+      & docker tag xl1:local "xl1:$prevVersion" 2>$null | Out-Null
+    }
+  } finally { $ErrorActionPreference = $eap }
+  if ($prevVersion) {
+    Say "kept the running image as xl1:$prevVersion in case this build goes badly" 'Yellow'
+  }
+
   $dockerfile = Join-Path $Upstream 'docker\Dockerfile'
   $buildArgs = @(
     'build', '--platform', $Platform, '-f', $dockerfile,
@@ -80,6 +127,24 @@ if (-not $DashboardOnly) {
     Die "asked for xl1-cli $CliVersion but the image reports: $($v.Trim())"
   }
   Say "xl1 $CliVersion verified in-image" 'Green'
+
+  # Tag what just landed too, so it is itself a fallback for the next build,
+  # and xl1ctl versions/rollback have something to see.
+  $eap = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try { & docker tag xl1:local "xl1:$CliVersion" 2>$null | Out-Null } finally { $ErrorActionPreference = $eap }
+
+  # Only record a target when the build actually changed something -- re-running
+  # Build.ps1 at the version already installed must not leave rollback pointing
+  # at itself, or the recovery path becomes a no-op at the worst moment.
+  if ($prevVersion -and $prevVersion -ne $CliVersion) {
+    $rollbackFile = Join-Path $Root 'state\rollback'
+    New-Item -ItemType Directory -Force -Path (Split-Path $rollbackFile) | Out-Null
+    Set-Content -Path $rollbackFile -Value $prevVersion -NoNewline
+    Say "if this build misbehaves: .\scripts\xl1ctl.ps1 rollback (back to $prevVersion)" 'Yellow'
+  }
+
+  Invoke-VersionPrune -KeepA $CliVersion -KeepB $prevVersion
 }
 
 if (-not $ProducerOnly) {
