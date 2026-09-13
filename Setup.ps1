@@ -407,6 +407,37 @@ elseif (-not $SkipTask) {
       Say "  powershell -File `"$updScript`" -Check" 'Yellow'
     }
   }
+
+  # The OS layer underneath xl1-cli. Windows Update drifts independently of the
+  # producer image -- this machine sat on 63 pending host packages while the
+  # cli itself stayed current, which is exactly the gap this closes.
+  #
+  # Checked every 6h rather than timed like the cli update: the script decides
+  # for itself whether to act, on whichever comes first of $Threshold pending
+  # updates or $MaxAgeHours since the last applied install (see the script).
+  $hostUpdTask   = 'XL1 Host Update'
+  $hostUpdScript = Join-Path $Root 'scripts\xl1-host-update.ps1'
+  if (Test-Path $hostUpdScript) {
+    $huArgs   = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $hostUpdScript + '"'
+    $huAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $huArgs
+    $huNow = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(30) `
+               -RepetitionInterval (New-TimeSpan -Hours 6) -RepetitionDuration $forever
+    try {
+      Unregister-ScheduledTask -TaskName $hostUpdTask -Confirm:$false -ErrorAction SilentlyContinue
+      # A download-and-install pass, occasionally with a reboot on the end of
+      # it, needs more than the 5 minutes the other tasks get.
+      $huSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+                      -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 60)
+      Register-ScheduledTask -TaskName $hostUpdTask -Action $huAction -Trigger $huNow `
+        -Settings $huSettings -RunLevel Highest -Force -ErrorAction Stop | Out-Null
+      Start-ScheduledTask -TaskName $hostUpdTask
+      Say 'registered and started "XL1 Host Update" (every 6h, threshold 10 / max age 72h)' 'Green'
+    }
+    catch {
+      Say "could not register the host-update task: $($_.Exception.Message)" 'Yellow'
+      Say "  powershell -File `"$hostUpdScript`" -Check" 'Yellow'
+    }
+  }
 }
 
 Head 'Next'
