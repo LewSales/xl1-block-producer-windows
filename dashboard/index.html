@@ -1339,19 +1339,29 @@ function render(d) {
     const localPart = lat.localMs !== undefined && lat.wireFloorMs !== undefined
       ? `${num(lat.localMs)} ms of it local`
       : 'local share unknown'
+    // The headline is the same figure public.html leads with — the median
+    // whole production cycle, not the head-fetch round trip. Head fetch is
+    // one stage nested inside it and belongs in the breakdown, not the "big"
+    // number, or two pages describing the same node disagree on what
+    // "typical" means.
+    const hasCycle = lat.cycleP50Ms !== undefined
     groups.production.push(`<section style="--c: var(--acc-latency); --mo:84">
       <h2><span class="ico" aria-hidden="true">📡</span>Latency</h2>
-      <div class="big">${num(lat.typicalMs)} <span style="font-size:14px;color:var(--muted)">ms typical</span></div>
-      <div class="sub">head fetch, ${localPart}</div>
+      ${hasCycle
+        ? `<div class="big">${num(lat.cycleP50Ms)} <span style="font-size:14px;color:var(--muted)">ms typical production cycle</span></div>
+           <div class="sub">p95 ${num(lat.cycleP95Ms)} ms · head fetch ${num(lat.typicalMs)} ms, ${localPart} · ${num(lat.samples)} samples</div>`
+        : `<div class="big">${num(lat.typicalMs)} <span style="font-size:14px;color:var(--muted)">ms typical</span></div>
+           <div class="sub">head fetch, ${localPart}</div>`}
       ${(() => {
         // Bars share one scale so the comparison is honest — the eye is being
         // asked to judge proportion, and per-row scaling would make the wire
         // floor look the same size as a 2.4s cycle.
         const rows = [
           ['wire', 'Wire', lat.wireFloorMs, 'the network itself: the fastest head fetch seen'],
-          ['', 'p50', lat.typicalMs, 'half of head fetches were faster than this'],
-          ['tail', 'p95', lat.p95Ms, 'the slow 5% — what a bad moment costs'],
-          ['tail', 'Cycle', lat.cycleP95Ms, 'a whole production cycle at p95, budget is 1000ms'],
+          ['', 'Head fetch p50', lat.typicalMs, 'half of head fetches were faster than this'],
+          ['tail', 'Head fetch p95', lat.p95Ms, 'the slow 5% — what a bad moment costs'],
+          ['', 'Cycle p50', lat.cycleP50Ms, 'half of production cycles were faster than this, budget is 1000ms'],
+          ['tail', 'Cycle p95', lat.cycleP95Ms, 'a whole production cycle at p95, budget is 1000ms'],
         ].filter(([, , v]) => Number.isFinite(v))
         const top = Math.max(...rows.map(([, , v]) => v), 1)
         return rows.map(([cls, label, v, tip]) => `<div class="lat-row" title="${esc(tip)}">
