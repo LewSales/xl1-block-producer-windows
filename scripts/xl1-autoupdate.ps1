@@ -88,11 +88,13 @@ try {
 } finally { Pop-Location }
 
 Log 'restarting the producer and dashboard'
-& docker compose -f (Join-Path $Root 'node.yml') -f (Join-Path $Root 'compose\producer-tuning.yml') up -d --force-recreate 2>&1 | Select-Object -Last 2 | ForEach-Object { Log "  $_" }
-# Graceful: the dashboard flushes its trend store on SIGTERM, and a hard
-# recreate loses whatever has not been written yet.
-& docker stop -t 20 xl1-dashboard 2>$null | Out-Null
-& docker compose -f (Join-Path $Root 'dashboard.yml') -f (Join-Path $Root 'compose\dashboard-tailnet.yml') up -d --force-recreate 2>&1 | Select-Object -Last 1 | ForEach-Object { Log "  $_" }
+# Hand off to xl1ctl rather than reimplementing its compose invocation here --
+# this line previously pointed at a $Root\node.yml that never existed (the
+# real file is upstream\compose\node.yml) and skipped the XL1_IMAGE /
+# XL1_PRESET_ENV_FILE / XL1_PRODUCER_PRESET(_REST) env vars the compose file
+# needs, which is exactly the kind of drift a second copy invites.
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root 'scripts\xl1ctl.ps1') restart 2>&1 |
+  ForEach-Object { Log "  $_" }
 
 $now = ''
 try {
