@@ -17,7 +17,7 @@
 [CmdletBinding()]
 param(
   [string]$CliVersion  = '5.3.2',
-  [string]$NodeVersion = '24.14.1',
+  [string]$NodeVersion = '26.9.0',
   [switch]$ProducerOnly,
   [switch]$DashboardOnly
 )
@@ -82,7 +82,9 @@ if (-not $DashboardOnly) {
   if (-not (Test-Path (Join-Path $Upstream 'dist\node\entrypoint.mjs'))) {
     Say 'compiling the entrypoint (in a container -- no Node needed on Windows)'
     $img = 'node:' + $NodeVersion + '-bookworm-slim'
-    $cmd = 'corepack enable && pnpm install --frozen-lockfile --prefer-offline && pnpm xy compile'
+    # Node 26 dropped the bundled Corepack, so it is no longer guaranteed to be
+    # on PATH -- install it from npm when missing, then enable it as before.
+    $cmd = '(command -v corepack >/dev/null 2>&1 || npm install -g corepack) && corepack enable && pnpm install --frozen-lockfile --prefer-offline && pnpm xy compile'
     # COREPACK_ENABLE_DOWNLOAD_PROMPT=0: corepack asks before fetching pnpm, and
     # with no TTY on stdin that question is never answered -- the container sits
     # there forever, which reads as a slow network rather than as a hang.
