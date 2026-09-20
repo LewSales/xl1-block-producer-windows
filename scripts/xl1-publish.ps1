@@ -91,7 +91,6 @@ function Setting { param([string]$Name, $Default = '')
 $Url     = Setting 'XL1_PUBLISH_URL' 'http://127.0.0.1:8088/api/public'
 $Token   = Setting 'XL1_PUBLISH_TOKEN' ''
 $Repo    = Setting 'XL1_PUBLISH_REPO' ''
-$GitToken = Setting 'XL1_PUBLISH_GIT_TOKEN' ''
 $Branch  = Setting 'XL1_PUBLISH_BRANCH' 'main'
 $SubPath = Setting 'XL1_PUBLISH_PATH' 'xl1/windows'
 $WorkDir = Setting 'XL1_PUBLISH_WORKDIR' (Join-Path $Root 'state\publish')
@@ -148,18 +147,6 @@ try {
 } catch { Log "refused to publish: $($_.Exception.Message)"; exit 1 }
 
 # ------------------------------------------------------------------ working copy
-# Scoped to this process only. Under an interactive shell, Git Credential
-# Manager silently reuses the cached wincredman entry for github.com -- proven
-# working by hand. Under this script's scheduled task, GCM instead decided it
-# needed to prompt, tried to open /dev/tty to do it, and failed outright
-# because a hidden scheduled task has no terminal attached ("could not read
-# Username for 'https://github.com'"), and GCM_INTERACTIVE=never did not stop
-# it from trying. Rather than depend on GCM at all in this headless context, a
-# token scoped to just this repo is embedded in the remote URL below, so git
-# authenticates on its own and never invokes a credential helper for this push.
-$env:GCM_INTERACTIVE = 'never'
-$AuthedRepo = $Repo
-if ($GitToken -and $Repo -match '^https://') { $AuthedRepo = $Repo -replace '^https://', "https://$GitToken@" }
 if (-not (Test-Path $WorkDir)) { New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null }
 $gitDir = Join-Path $WorkDir '.git'
 Push-Location $WorkDir
@@ -167,12 +154,9 @@ try {
   if (-not (Test-Path $gitDir)) {
     # Shallow and single-branch: this repository is a delivery mechanism, and
     # its history is of no use on a producer.
-    & git clone --quiet --depth 1 --branch $Branch --single-branch $AuthedRepo . 2>&1 | Out-Null
+    & git clone --quiet --depth 1 --branch $Branch --single-branch $Repo . 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) { Log "clone of $Repo failed"; exit 1 }
   }
-  # Refresh the remote URL every run, not just on first clone: a working copy
-  # cloned before the token existed (or before it was rotated) still needs it.
-  & git remote set-url origin $AuthedRepo | Out-Null
   & git config user.name $Name | Out-Null
   & git config user.email $Email | Out-Null
 
@@ -230,9 +214,8 @@ try {
   # rebase can never conflict -- but it can still be rejected for being behind,
   # which is what this retries.
   $pushed = $false
-  $lastPushOutput = $null
   foreach ($attempt in 1..3) {
-    $lastPushOutput = & git push --quiet origin $Branch 2>&1
+    & git push --quiet origin $Branch 2>&1 | Out-Null
     if ($LASTEXITCODE -eq 0) { $pushed = $true; break }
     & git fetch --quiet origin $Branch 2>&1 | Out-Null
     & git rebase --quiet "origin/$Branch" 2>&1 | Out-Null
@@ -242,11 +225,6 @@ try {
       exit 1
     }
   }
-  # The push line used to discard git's own stderr (2>&1 | Out-Null), so every
-  # failure here logged the same generic line regardless of cause -- a
-  # non-fast-forward race and a broken credential were indistinguishable from
-  # the log alone. Keep the last attempt's real output so the next failure
-  # says why.
-  if ($pushed) { Log "published $who" } else { Log "push rejected three times -- giving up until the next run -- last error: $($lastPushOutput -join ' | ')"; exit 1 }
+  if ($pushed) { Log "published $who" } else { Log 'push rejected three times -- giving up until the next run'; exit 1 }
 }
 finally { Pop-Location }
