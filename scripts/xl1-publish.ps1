@@ -91,12 +91,6 @@ function Setting { param([string]$Name, $Default = '')
 $Url     = Setting 'XL1_PUBLISH_URL' 'http://127.0.0.1:8088/api/public'
 $Token   = Setting 'XL1_PUBLISH_TOKEN' ''
 $Repo    = Setting 'XL1_PUBLISH_REPO' ''
-# A PAT scoped to just this repo, used only for git itself (clone/fetch/push).
-# Task Scheduler's process has no console for Git Credential Manager to prompt
-# from and, run elevated, cannot even persist a credential to wincredman to
-# reuse next time -- it fails outright, every run, forever. Embedding this in
-# the remote URL bypasses the credential helper for this remote entirely.
-$GitToken = Setting 'XL1_PUBLISH_GIT_TOKEN' ''
 $Branch  = Setting 'XL1_PUBLISH_BRANCH' 'main'
 $SubPath = Setting 'XL1_PUBLISH_PATH' 'xl1/windows'
 $WorkDir = Setting 'XL1_PUBLISH_WORKDIR' (Join-Path $Root 'state\publish')
@@ -121,19 +115,6 @@ $LiveAuth   = Setting 'XL1_PUBLISH_LIVE_AUTH' ''
 $LiveMethod = Setting 'XL1_PUBLISH_LIVE_METHOD' 'PUT'
 
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
-
-# Never let git fall back to an interactive prompt it cannot show -- fail fast
-# with a clear error in the log instead of hanging until the task's time limit
-# kills it.
-$env:GIT_TERMINAL_PROMPT = '0'
-
-# Insert the PAT into the URL so git authenticates without touching any
-# credential helper. Left alone (no token configured) when $Repo is not
-# https, so an ssh:// remote using its own key keeps working unchanged.
-function AuthenticatedRepoUrl { param([string]$RepoUrl, [string]$GitToken)
-  if (-not $GitToken -or $RepoUrl -notmatch '^https://') { return $RepoUrl }
-  return $RepoUrl -replace '^https://', "https://$GitToken@"
-}
 
 function Log { param([string]$m)
   Write-Output $m
@@ -170,17 +151,12 @@ if (-not (Test-Path $WorkDir)) { New-Item -ItemType Directory -Path $WorkDir -Fo
 $gitDir = Join-Path $WorkDir '.git'
 Push-Location $WorkDir
 try {
-  $authRepo = AuthenticatedRepoUrl $Repo $GitToken
   if (-not (Test-Path $gitDir)) {
     # Shallow and single-branch: this repository is a delivery mechanism, and
     # its history is of no use on a producer.
-    & git clone --quiet --depth 1 --branch $Branch --single-branch $authRepo . 2>&1 | Out-Null
+    & git clone --quiet --depth 1 --branch $Branch --single-branch $Repo . 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) { Log "clone of $Repo failed"; exit 1 }
   }
-  # Idempotent, and cheap enough to run every time: keeps an already-cloned
-  # working copy in step with a token that was added, rotated, or removed
-  # from config since the clone.
-  & git remote set-url origin $authRepo | Out-Null
   & git config user.name $Name | Out-Null
   & git config user.email $Email | Out-Null
 
@@ -236,16 +212,10 @@ try {
 
   # Two nodes push to one repository. Each writes only its own directory, so a
   # rebase can never conflict -- but it can still be rejected for being behind,
-  # which is what this retries. Three attempts was not enough: once a gap (the
-  # node being down, a bad run) let this fall more than a couple of commits
-  # behind, it lost the race against the other node's five-minute cadence every
-  # single time and stayed stuck for hours until someone pushed by hand. Retry
-  # generously instead, with a short random backoff so two nodes recovering
-  # from the same outage do not lock-step onto the same instant.
+  # which is what this retries.
   $pushed = $false
-  $lastPushOutput = $null
-  for ($attempt = 1; $attempt -le 20; $attempt++) {
-    $lastPushOutput = & git push --quiet origin $Branch 2>&1
+  foreach ($attempt in 1..3) {
+    & git push --quiet origin $Branch 2>&1 | Out-Null
     if ($LASTEXITCODE -eq 0) { $pushed = $true; break }
     & git fetch --quiet origin $Branch 2>&1 | Out-Null
     & git rebase --quiet "origin/$Branch" 2>&1 | Out-Null
@@ -254,16 +224,7 @@ try {
       Log 'rebase failed -- leaving the working copy alone for the next run'
       exit 1
     }
-    Start-Sleep -Milliseconds (300 + (Get-Random -Maximum 700))
   }
-  if ($pushed) { Log "published $who" } else {
-    $reason = ($lastPushOutput | Out-String).Trim() -replace '[\r\n]+', ' | '
-    # Belt and suspenders: git redacts a URL's embedded credential in its own
-    # messages, but this diagnostic text goes into a log file, so scrub the
-    # literal token too in case some future error path echoes it back whole.
-    if ($GitToken) { $reason = $reason.Replace($GitToken, '***') }
-    Log "push rejected after 20 attempts -- $reason"
-    exit 1
-  }
+  if ($pushed) { Log "published $who" } else { Log 'push rejected three times -- giving up until the next run'; exit 1 }
 }
 finally { Pop-Location }
