@@ -212,9 +212,14 @@ try {
 
   # Two nodes push to one repository. Each writes only its own directory, so a
   # rebase can never conflict -- but it can still be rejected for being behind,
-  # which is what this retries.
+  # which is what this retries. Three attempts was not enough: once a gap (the
+  # node being down, a bad run) let this fall more than a couple of commits
+  # behind, it lost the race against the other node's five-minute cadence every
+  # single time and stayed stuck for hours until someone pushed by hand. Retry
+  # generously instead, with a short random backoff so two nodes recovering
+  # from the same outage do not lock-step onto the same instant.
   $pushed = $false
-  foreach ($attempt in 1..3) {
+  for ($attempt = 1; $attempt -le 20; $attempt++) {
     & git push --quiet origin $Branch 2>&1 | Out-Null
     if ($LASTEXITCODE -eq 0) { $pushed = $true; break }
     & git fetch --quiet origin $Branch 2>&1 | Out-Null
@@ -224,7 +229,8 @@ try {
       Log 'rebase failed -- leaving the working copy alone for the next run'
       exit 1
     }
+    Start-Sleep -Milliseconds (300 + (Get-Random -Maximum 700))
   }
-  if ($pushed) { Log "published $who" } else { Log 'push rejected three times -- giving up until the next run'; exit 1 }
+  if ($pushed) { Log "published $who" } else { Log 'push rejected after 20 attempts -- leaving the working copy alone for the next run'; exit 1 }
 }
 finally { Pop-Location }
