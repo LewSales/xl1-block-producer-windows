@@ -16,7 +16,7 @@
 #>
 [CmdletBinding()]
 param(
-  [string]$CliVersion  = '5.3.2',
+  [string]$CliVersion  = '5.4.1',
   [string]$NodeVersion = '26.9.0',
   [switch]$ProducerOnly,
   [switch]$DashboardOnly
