@@ -44,6 +44,10 @@ $server = Start-Job -ScriptBlock {
   $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $port)
   $listener.Start()
   while ($true) {
+    # Poll rather than block: AcceptTcpClient() is a .NET call Stop-Job cannot
+    # interrupt, so teardown hung until some connection happened to arrive.
+    # Start-Sleep is a pipeline stop point, so this loop dies when asked.
+    while (-not $listener.Pending()) { Start-Sleep -Milliseconds 25 }
     $client = $listener.AcceptTcpClient()
     try {
       $stream = $client.GetStream()
@@ -82,6 +86,8 @@ $sink = Start-Job -ScriptBlock {
   $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $port)
   $listener.Start()
   while ($true) {
+    # Same as the status server: poll so Stop-Job can end it.
+    while (-not $listener.Pending()) { Start-Sleep -Milliseconds 25 }
     $client = $listener.AcceptTcpClient()
     try {
       $stream = $client.GetStream()
