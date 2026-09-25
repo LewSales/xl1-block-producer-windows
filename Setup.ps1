@@ -17,7 +17,7 @@ param(
   # Kept in step with Build.ps1's own default. These drifted -- Setup said 5.3.1
   # while Build said 5.3.2 -- so running Setup.ps1 quietly built an OLDER cli
   # than running Build.ps1 by hand, and neither said so.
-  [string]$CliVersion = '5.4.1',
+  [string]$CliVersion = '5.5.0',
   [switch]$SkipBuild,
   [switch]$SkipTask
 )
