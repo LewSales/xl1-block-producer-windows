@@ -265,10 +265,18 @@ try {
                         @('blockProduction', $statz.timings.blockProduction),
                         @('mempoolTx', $statz.timings.mempoolPendingTransactionsFetch),
                         @('mempoolBlocks', $statz.timings.mempoolPendingBlocksFetch),
-                        @('submit', $statz.timings.mempoolSubmitBlock))) {
+                        @('submit', $statz.timings.mempoolSubmitBlock),
+                        # xl1-cli 5.5.0+ also times the time payload (two sequential
+                        # Sepolia calls for the EVM anchor, the largest measured step on
+                        # the producing path) and the reward diviner. Older CLIs omit
+                        # both keys and the stages simply drop out.
+                        @('timePayload', $statz.timings.timePayloadGeneration),
+                        @('rewardTransfers', $statz.timings.blockRewardTransfers))) {
       if ($null -ne $pair[1] -and $null -ne $pair[1].p50Ms) { $stages[$pair[0]] = $pair[1].p50Ms }
     }
     if ($stages.Count -gt 0) { $lat.stages = $stages }
+    $tp = $statz.timings.timePayloadGeneration
+    if ($null -ne $tp -and $null -ne $tp.p95Ms) { $lat.timePayloadP95Ms = $tp.p95Ms }
     # Whether the node is keeping up, which is what decides whether a slow cycle
     # is a fault or just a characteristic. Same payload, no extra request.
     if ($null -ne $statz.counts) {

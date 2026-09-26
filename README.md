@@ -23,6 +23,7 @@ changes that. A desktop CPU is the fix.
   dashboard.yml                                    the dashboard, mine
   scripts/xl1-collect.ps1                          scheduled task, writes state/producer-status.json
   scripts/xl1-alert.ps1                            scheduled task, reads /api/status and notifies
+  scripts/xl1-perf-snapshot.ps1                    read-only: accepted share, competitor shares, /statz over one window
   scripts/xl1ctl.ps1                               one command instead of two compose files
 ```
 
