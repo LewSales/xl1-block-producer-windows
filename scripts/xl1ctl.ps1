@@ -435,7 +435,10 @@ switch ($Command) {
           # Mounted is not the same as matching: a stale path can mount an old
           # file. Compare what the container reads against what is on disk.
           $inside = (& docker exec xl1-node-preset-1 cat /opt/xl1/presets/roles/producer-rest.json 2>$null) -join "`n"
-          $onDisk = (Get-Content $PresetRest -Raw)
+          # docker exec hands back lines, which are re-joined with LF; the file on
+          # disk is CRLF. Compare content, not line endings, or a byte-identical
+          # bind mount reads as a mismatch.
+          $onDisk = (Get-Content $PresetRest -Raw) -replace "`r`n", "`n"
           if ($inside -and ($inside.Trim() -ne $onDisk.Trim())) {
             Say 'FAIL  the mounted producer-rest preset differs from presets\roles\' 'Red'; $issues++
           }
