@@ -2670,8 +2670,8 @@ const snapshot = () => ({
       commitUrl: clean ? `${source}/commit/${commit}` : undefined,
       // Who wrote each half. Configurable rather than hardcoded so a fork does
       // not end up crediting someone else's brand for its own dashboard.
-      brandName: envStr('DASH_BRAND_NAME', 'WinLEW'),
-      brandUrl: envStr('DASH_BRAND_URL', 'https://winlew.co'),
+      brandName: envStr('DASH_BRAND_NAME', 'Oxyon'),
+      brandUrl: envStr('DASH_BRAND_URL', 'https://oxyon.io/xl1/'),
       upstreamName: envStr('DASH_UPSTREAM_NAME', 'XYO Network'),
       upstreamUrl: envStr('DASH_UPSTREAM_URL', 'https://xyo.network'),
     }
@@ -2869,8 +2869,8 @@ function publicView(board) {
       version: BUILD_STAMP.version ?? DASH_VERSION,
       commit: BUILD_STAMP.commit ?? envStr('DASH_COMMIT', 'unknown'),
       source: envStr('DASH_SOURCE_URL', '').replace(/\/+$/, '') || undefined,
-      brandName: envStr('DASH_BRAND_NAME', 'WinLEW'),
-      brandUrl: envStr('DASH_BRAND_URL', 'https://winlew.co'),
+      brandName: envStr('DASH_BRAND_NAME', 'Oxyon'),
+      brandUrl: envStr('DASH_BRAND_URL', 'https://oxyon.io/xl1/'),
       upstreamName: envStr('DASH_UPSTREAM_NAME', 'XYO Network'),
       upstreamUrl: envStr('DASH_UPSTREAM_URL', 'https://xyo.network'),
     },
