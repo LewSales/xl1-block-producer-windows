@@ -346,7 +346,10 @@ resumes rather than starts over. It serves the result on `127.0.0.1:8099` (`/rac
 `/health`), rebuilt every 2 minutes.
 
 Two scheduled tasks run it:
-- **XL1 Race Service** runs at logon: `node scripts\race\race-service.mjs`.
+- **XL1 Race Service** runs at logon and again every 5 minutes: `node scripts\race\race-service.mjs`.
+  The task ignores a second start while one is running, so the 5-minute trigger only revives a
+  service that has stopped. Task Scheduler's own restart-on-failure does not cover a process that
+  exits after starting. A fatal error is written to `state\race\service.log` before it exits.
 - **XL1 Race Publisher** runs every 15 minutes:
   `scripts\xl1-publish.ps1 -Config config\publish-race.env`, from
   `config\publish-race.env.template`. It pushes `race.json` to xl1-status-data.
