@@ -31,6 +31,10 @@ const RPC = 'https://beta.api.chain.xyo.network/rpc', CDN_HEAD = 'https://state.
 const EVENTS_FILE = path.join(STATE, 'events.jsonl'), CHAIN_FILE = path.join(STATE, 'chain.json'), OUT_FILE = path.join(STATE, 'race.json'), LOG_FILE = path.join(STATE, 'service.log')
 
 const log = m => { try { fs.appendFileSync(LOG_FILE, `${new Date().toISOString()} ${m}\n`) } catch {} }
+// The service runs in a hidden window, so a crash printed to the console is a crash nobody
+// sees. Write it here, then exit non-zero: the scheduled task's 5-minute trigger restarts it.
+for (const ev of ['uncaughtException', 'unhandledRejection']) process.on(ev, e => { log(`fatal ${ev}: ${e?.stack ?? e}`); process.exit(1) })
+process.on('exit', code => { if (code) log(`exit ${code}`) })
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 const rpc = async (method, params) => (await (await fetch(RPC, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }), signal: AbortSignal.timeout(5000) })).json()).result
 const timeOf = p => (p || []).find(x => x.schema === 'network.xyo.time') || {}
