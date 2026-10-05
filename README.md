@@ -320,6 +320,41 @@ standings file it lives in carries no interval history from before the feature
 existed, and there is no honest way to reconstruct it: the day buckets record
 who produced each block, not when. Give it an hour of chain.
 
+## The block-race feed
+
+The chain records which candidate won each height and throws away the order the
+others arrived in, so the race can only be studied by watching it.
+`scripts\race\race-service.mjs` watches: read-only, from this PC, and never from
+inside either producer.
+
+| Source | Polled | Gives |
+|---|---|---|
+| `mempoolViewer_pendingBlocks` on the public RPC | 500 ms | every candidate, its producer, its time payload, when it appeared |
+| `state.sequence.xyo.space` head, `blocks.sequence.xyo.space` | 500 ms | which candidate won |
+| pending transactions | 1 s | when work arrived |
+| both nodes' build logs (`docker logs` here, `journalctl` on the Pi over ssh) | rebuild | our own per-stage timings |
+
+`race-lib.mjs` turns that into `race.json`:
+- arrival rank per height, and win rate by arrival position;
+- the newest-candidate tie-break check (`rule.newestAt2nd`, see xl1-docker-images#12);
+- per-producer latency ranges;
+- a 40-height waterfall;
+- last-1000 and hourly standings.
+
+It keeps a 6 h window in `state\race\events.jsonl` and a 2,600-block chain cache, so a restart
+resumes rather than starts over. It serves the result on `127.0.0.1:8099` (`/race.json`,
+`/health`), rebuilt every 2 minutes.
+
+Two scheduled tasks run it:
+- **XL1 Race Service** runs at logon: `node scripts\race\race-service.mjs`.
+- **XL1 Race Publisher** runs every 15 minutes:
+  `scripts\xl1-publish.ps1 -Config config\publish-race.env`, from
+  `config\publish-race.env.template`. It pushes `race.json` to xl1-status-data.
+
+Producer names come from `PRODUCERS` in `race-lib.mjs`. Every operator listed there has agreed
+to be named; anyone else appears by address. Settings are environment variables, listed at the
+top of `race-service.mjs`.
+
 ## Differences from the Pi bundle
 
 | | Pi | Windows |
