@@ -8,10 +8,14 @@
 # minute earlier. Measured on the Pi it was the whole gate: 0.5-2% of the chain
 # at 60000, 13.6% at 5000.
 #
-# 5000 is not an aggressive value. It is MIN_POLL_INTERVAL_MS in upstream's own
-# FinalizedBlockStream — the floor XYO enforces on itself — so this sits inside
-# the rate they sanction rather than beyond it. Below 5000 there is no
-# defensible ground.
+# The presets now set 4000, one step under the 5000 that was measured above.
+# 5000 is MIN_POLL_INTERVAL_MS in upstream's own FinalizedBlockStream, but that
+# stream is not bound in the producer role, so it is a reference point rather
+# than a floor the producer enforces. 4000 is this repo's floor: going lower
+# only raises load on XYO's shared RPC for a shrinking share of the ~6 s window
+# a pending transaction survives, and no measurement here supports it. The
+# gains left are on the producing path, not in the poll rate — see the Pi
+# repo's docs/performance audit (CLI 5.5.0 re-baseline).
 #
 # Every other field must match the image's own producer.json. This shadows the
 # whole file, not the one key, so a field left out here is a field the producer

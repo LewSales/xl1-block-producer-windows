@@ -40,6 +40,7 @@ foreach ($f in @(
   (Join-Path $Root 'scripts\xl1ctl.ps1'),
   (Join-Path $Root 'scripts\xl1-collect.ps1'),
   (Join-Path $Root 'scripts\xl1-alert.ps1'),
+  (Join-Path $Root 'scripts\xl1-perf-snapshot.ps1'),
   (Join-Path $Root 'tests\alert.test.ps1')
 )) {
   if (-not (Test-Path $f)) { Bad "$(Split-Path -Leaf $f) -- missing"; continue }
