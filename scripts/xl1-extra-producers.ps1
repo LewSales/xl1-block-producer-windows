@@ -20,8 +20,9 @@
     powershell -File .\scripts\xl1-extra-producers.ps1 status
     powershell -File .\scripts\xl1-extra-producers.ps1 up -Only xl1-seq-23b3   # just one
 
-  cc91 on mainnet is PAUSED (2026-10-08: no blocks accepted; waiting on XYO to
-  allow the key). A bare `up` would start it again -- use -Only until then.
+  cc91 on mainnet: no blocks accepted in its first test (2026-10-08), most likely
+  because XYO has not yet allowed the key there. Running again from 2026-10-09
+  so it lands as soon as the key is allowed. `down -Only xl1-main-cc91` pauses it.
 #>
 [CmdletBinding()]
 param(
