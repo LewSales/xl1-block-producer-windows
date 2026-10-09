@@ -4,30 +4,61 @@
 //   node race-service.mjs            run (the "XL1 Race Service" task starts it at logon)
 //   node race-service.mjs --once     observe for OBSERVE_ONCE_MS, write race.json, exit (testing)
 //
-// Runs on this PC, off both producers, and never contacts a producer's process. It reads:
+// Never contacts a producer's process. It reads:
 //   - the public candidate pool and pending transactions (XYO RPC, read-only methods)
 //   - the published head and recent finalized blocks (the public REST CDN)
-//   - our two nodes' own build logs (docker logs here, journalctl on the Pi over ssh)
-// Settings (environment): RACE_PORT 8099, RACE_WINDOW_H 6, RACE_POOL_MS 500, RACE_HEAD_MS 500,
-// RACE_TX_MS 1000, RACE_REBUILD_MS 120000, RACE_WATERFALL 40, RACE_PI_SSH xl1pi@xl1pi,
-// RACE_WIN_CONTAINER xl1-node-preset-1.
+//   - optionally, our nodes' own build logs (RACE_BUILDLOGS=windows: docker logs here,
+//     journalctl on the Pi over ssh; =none: arrival order only)
+// Settings (environment): RACE_NETWORK sequence|mainnet, RACE_PORT 8099, RACE_STATE_DIR,
+// RACE_WINDOW_H 6, RACE_POOL_MS 500, RACE_HEAD_MS 500, RACE_TX_MS 1000, RACE_REBUILD_MS 120000,
+// RACE_WATERFALL 40, RACE_BUILDLOGS windows|none, RACE_PI_SSH xl1pi@xl1pi,
+// RACE_WIN_CONTAINER xl1-node-preset-1, and a guard for when it runs beside a producer:
+// RACE_GUARD_URL (that producer's dashboard /api/public) + RACE_GUARD_P95_MS (2500): while the
+// producer's 95th-percentile cycle is above it, the observer stops polling for 10 minutes.
 import fs from 'node:fs'
 import path from 'node:path'
 import http from 'node:http'
 import { execFile } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { buildDataset, nameOf, parseBuildLog } from './race-lib.mjs'
+import { buildDataset, makeNameOf, parseBuildLog } from './race-lib.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
-const STATE = path.resolve(HERE, '..', '..', 'state', 'race')
-fs.mkdirSync(STATE, { recursive: true })
 const env = (k, d) => (process.env[k] ?? d)
+const STATE = env('RACE_STATE_DIR', path.resolve(HERE, '..', '..', 'state', 'race'))
+fs.mkdirSync(STATE, { recursive: true })
+const NET = env('RACE_NETWORK', 'sequence')
+if (!['sequence', 'mainnet'].includes(NET)) throw new Error(`RACE_NETWORK must be sequence or mainnet, not ${NET}`)
+const nameOf = makeNameOf(NET)
+const BUILDLOGS = env('RACE_BUILDLOGS', NET === 'sequence' ? 'windows' : 'none')
+const GUARD_URL = env('RACE_GUARD_URL', ''), GUARD_P95 = +env('RACE_GUARD_P95_MS', 2500)
 const PORT = +env('RACE_PORT', 8099), WINDOW = +env('RACE_WINDOW_H', 6) * 3.6e6
 const POOL_MS = +env('RACE_POOL_MS', 500), HEAD_MS = +env('RACE_HEAD_MS', 500), TX_MS = +env('RACE_TX_MS', 1000)
 const REBUILD_MS = +env('RACE_REBUILD_MS', 120000), WATERFALL = +env('RACE_WATERFALL', 40)
 const PI_SSH = env('RACE_PI_SSH', 'xl1pi@xl1pi'), WIN_CONTAINER = env('RACE_WIN_CONTAINER', 'xl1-node-preset-1')
 const ONCE = process.argv.includes('--once'), ONCE_MS = +env('OBSERVE_ONCE_MS', 120000)
-const RPC = 'https://beta.api.chain.xyo.network/rpc', CDN_HEAD = 'https://state.sequence.xyo.space/chain/head.json', CDN_BLOCKS = 'https://blocks.sequence.xyo.space/block/number/'
+const ENDPOINTS = {
+  sequence: { rpc: 'https://beta.api.chain.xyo.network/rpc', head: 'https://state.sequence.xyo.space/chain/head.json', blocks: 'https://blocks.sequence.xyo.space/block/number/' },
+  mainnet: { rpc: 'https://api.chain.xyo.network/rpc', head: 'https://state.mainnet.xyo.space/chain/head.json', blocks: 'https://blocks.mainnet.xyo.space/block/number/' },
+}
+const { rpc: RPC, head: CDN_HEAD, blocks: CDN_BLOCKS } = ENDPOINTS[NET]
+
+// ---- guard: when beside a producer, step aside if it is struggling ----
+let pausedUntil = 0
+async function guardLoop(until) {
+  if (!GUARD_URL) return
+  while (Date.now() < until) {
+    try {
+      const d = await (await fetch(GUARD_URL, { signal: AbortSignal.timeout(4000) })).json()
+      const p95 = d?.latency?.cycleP95Ms
+      if (p95 != null && p95 > GUARD_P95) {
+        if (Date.now() > pausedUntil) log(`guard: producer cycle p95 ${p95} ms > ${GUARD_P95} ms, pausing polls for 10 min`)
+        pausedUntil = Date.now() + 600000
+      }
+    } catch {}
+    await sleep(60000)
+  }
+}
+const paused = () => Date.now() < pausedUntil
 const EVENTS_FILE = path.join(STATE, 'events.jsonl'), CHAIN_FILE = path.join(STATE, 'chain.json'), OUT_FILE = path.join(STATE, 'race.json'), LOG_FILE = path.join(STATE, 'service.log')
 
 const log = m => { try { fs.appendFileSync(LOG_FILE, `${new Date().toISOString()} ${m}\n`) } catch {} }
@@ -49,6 +80,7 @@ const add = e => { events.push(e); try { fs.appendFileSync(EVENTS_FILE, JSON.str
 async function poolLoop(until) {
   while (Date.now() < until) {
     const s = Date.now()
+    if (paused()) { await sleep(POOL_MS); continue }
     try {
       const res = (await rpc('mempoolViewer_pendingBlocks', [])) || []
       const t = Date.now()
@@ -76,6 +108,7 @@ async function headLoop(until) {
 async function txLoop(until) {
   while (Date.now() < until) {
     const s = Date.now()
+    if (paused()) { await sleep(TX_MS); continue }
     try {
       const res = (await rpc('mempoolViewer_pendingTransactions', [{ limit: 100 }])) || []
       const t = Date.now()
@@ -108,6 +141,7 @@ async function refreshChain() {
 // ---- our nodes' build logs (read-only) ----
 const run = (cmd, args) => new Promise(res => execFile(cmd, args, { maxBuffer: 256 * 1024 * 1024, timeout: 60000, windowsHide: true }, (err, out, errOut) => res(err ? '' : (out || '') + (errOut || ''))))
 async function readBuilds() {
+  if (BUILDLOGS !== 'windows') return {}
   const hours = Math.ceil(WINDOW / 3.6e6)
   const win = await run('docker', ['logs', '-t', '--since', `${hours}h`, WIN_CONTAINER])
   const pi = await run('ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', PI_SSH, `journalctl -u xl1-producer --no-pager -o short-iso-precise --since "-${hours}h" | grep -E "Building block [0-9]+$|Generated time payload in"`])
@@ -124,7 +158,7 @@ async function rebuild() {
     try { fs.writeFileSync(EVENTS_FILE, events.map(e => JSON.stringify(e)).join('\n') + '\n') } catch {}   // compact the on-disk window
     await refreshChain().catch(e => log('chain refresh failed: ' + e))
     const builds = await readBuilds().catch(() => ({}))
-    const data = buildDataset(events, chain, builds, { waterfallHeights: WATERFALL })
+    const data = buildDataset(events, chain, builds, { waterfallHeights: WATERFALL, net: NET })
     latest = JSON.stringify(data)
     fs.writeFileSync(OUT_FILE + '.tmp', latest); fs.renameSync(OUT_FILE + '.tmp', OUT_FILE)
     lastBuildOk = Date.now()
@@ -134,14 +168,14 @@ async function rebuild() {
 if (!ONCE) {
   http.createServer((req, res) => {
     if (req.url.startsWith('/race.json') && latest) { res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(latest); return }
-    if (req.url.startsWith('/health')) { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ ok: !!latest, lastBuild: lastBuildOk, events: events.length, chain: chain.length })); return }
+    if (req.url.startsWith('/health')) { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ ok: !!latest, network: NET, lastBuild: lastBuildOk, events: events.length, chain: chain.length, paused: paused() })); return }
     res.writeHead(latest ? 404 : 503); res.end()
   }).listen(PORT, '127.0.0.1', () => log(`listening on 127.0.0.1:${PORT}`))
   try { latest = fs.readFileSync(OUT_FILE, 'utf8') } catch {}
 }
 
 const until = ONCE ? Date.now() + ONCE_MS : Infinity
-log(`start${ONCE ? ' (once)' : ''}: ${events.length} events restored, chain ${chain.length}`)
-const loops = Promise.all([poolLoop(until), headLoop(until), txLoop(until)])
+log(`start${ONCE ? ' (once)' : ''} on ${NET}: ${events.length} events restored, chain ${chain.length}`)
+const loops = Promise.all([poolLoop(until), headLoop(until), txLoop(until), guardLoop(until)])
 if (ONCE) { await loops; await rebuild(); console.log(fs.readFileSync(LOG_FILE, 'utf8').trim().split('\n').slice(-2).join('\n')) }
 else { await sleep(15000); await rebuild(); setInterval(rebuild, REBUILD_MS) }
