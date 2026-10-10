@@ -408,10 +408,10 @@ switch ($Command) {
     # `docker compose` by hand can do by passing one -f instead of two -- and
     # the mounts vanish silently. The producer then falls back to the presets
     # baked into the image, and the image ships
-    # blockProductionCheckInterval: 60000 where this repo sets 4000.
+    # blockProductionCheckInterval: 60000 where this repo sets 3000.
     #
     # Nothing about that looks wrong. The container runs, /livez passes, the
-    # health check is green, blocks are still produced -- just twelve times less
+    # health check is green, blocks are still produced -- just far less
     # often, which reads as bad luck rather than as a fault. It cost an hour
     # here before an operator noticed the node had gone quiet.
     if ($LASTEXITCODE -eq 0 -or $true) {

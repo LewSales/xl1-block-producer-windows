@@ -27,6 +27,11 @@ const preset = (name) => JSON.parse(readFileSync(join(root, 'presets', 'roles', 
 const INTERVAL_MIN = 3000
 const INTERVAL_MAX = 60000
 
+// The value selected for this Windows host (decision of 2026-10-10). A change
+// is a decision with its own evidence: update this, the presets, and the
+// "Selected configuration" record in docs/standards together.
+const SELECTED_INTERVAL = 3000
+
 // Bindings each role must keep. BlockRunner/BlockValidationViewer on memory are
 // upstream's own values; the rest must point at the network, never a local store.
 const REQUIRED = {
@@ -61,6 +66,17 @@ for (const name of Object.keys(REQUIRED)) {
 test('both role presets carry the same actor settings', () => {
   // XL1_ROLE picks one of the two; switching role must not change timing.
   assert.deepEqual(preset('producer.json').actors, preset('producer-rest.json').actors)
+})
+
+test('presets carry the selected interval, and the docs say the same', () => {
+  for (const name of Object.keys(REQUIRED)) {
+    assert.equal(preset(name).actors[0].blockProductionCheckInterval, SELECTED_INTERVAL, `${name} is not on the selected interval`)
+  }
+  // The comments operators read must not describe a different current value.
+  const tuning = readFileSync(join(root, 'compose', 'producer-tuning.yml'), 'utf8')
+  assert.match(tuning, new RegExp(`presets set ${SELECTED_INTERVAL}\\b`), 'producer-tuning.yml does not state the selected interval')
+  const ctl = readFileSync(join(root, 'scripts', 'xl1ctl.ps1'), 'utf8')
+  assert.match(ctl, new RegExp(`this repo sets ${SELECTED_INTERVAL}\\.`), 'xl1ctl.ps1 does not state the selected interval')
 })
 
 // git ls-files / check-ignore: the only process this file runs, read-only.
