@@ -171,6 +171,53 @@ XL1_ALERT_NAME=testnode
   Has   'a launch that never produced is caught'  'never-produced' (Mk2 1800 0)
   Hasnt 'a producing launch is not accused'       'never-produced' (Mk2 1800 4)
 
+  # ---------------------------------------------- maintenance holds (2.3.2)
+  # Own state directory and fixture copy, so the sequence below is not perturbed.
+  $hd = Join-Path $Work 'hold'; New-Item -ItemType Directory -Path $hd -Force | Out-Null
+  Copy-Item (Join-Path $Work 'status.json') (Join-Path $Work 'status-hold.json')
+  $probe3 = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0); $probe3.Start(); $DeadPort = $probe3.LocalEndpoint.Port; $probe3.Stop()
+  function HEnv { param($url) $f = Join-Path $hd ('h-' + [guid]::NewGuid().ToString('N') + '.env')
+    "XL1_ALERT_URL=$url`nXL1_ALERT_STATE=$hd\.alert-state`nXL1_ALERT_NAME=testnode" | Set-Content -Path $f -Encoding UTF8; $f }
+  $deadEnv = HEnv "http://127.0.0.1:$DeadPort/status.json"
+  $liveEnv = HEnv "http://127.0.0.1:$Port/status-hold.json"
+  function HA { param($envFile) $old = $env:XL1_ALERT_ENV; $env:XL1_ALERT_ENV = $envFile
+    try { (& $Alert @args *>&1 | Out-String) } finally { $env:XL1_ALERT_ENV = $old } }
+
+  Has   'a critical key is refused without the override' 'producer is down'  (HA $deadEnv -Hold node-down -Minutes 10 -Reason 'window')
+  Has   'a hold longer than the cap is refused'          'minutes must be'   (HA $deadEnv -Hold dashboard-unreachable -Minutes 90 -Reason 'long')
+  Has   'a hold needs a reason'                          'give a -Reason'    (HA $deadEnv -Hold dashboard-unreachable -Minutes 5)
+  Has   'a hold is accepted'                             'held dashboard-unreachable for 5 min' (HA $deadEnv -Hold dashboard-unreachable -Minutes 5 -Reason 'dashboard deploy')
+  Has   '-Holds lists it'                                'dashboard-unreachable' (HA $deadEnv -Holds)
+  $o = HA $deadEnv
+  Hasnt 'a held unreachable dashboard does not page'     'Dashboard API did not answer' $o
+  $st = @(Get-Content (Join-Path $hd '.alert-state') -ErrorAction SilentlyContinue | Where-Object { $_ })
+  Check 'nothing is recorded as firing'                  $st.Count 0
+  Has   'the hold is published in .alert-status'         '"holds":[{"key":"dashboard-unreachable"' (Get-Content (Join-Path $hd '.alert-status') -Raw)
+  $o = HA $liveEnv
+  Has   'other alerts still fire during a hold'          'cannot produce' $o
+  Has   'and the stall alert too'                        'not landing anything' $o
+  [void](HA $liveEnv -Hold ineligible -Minutes 5 -Reason 'test')
+  (Get-Content (Join-Path $Work 'status-hold.json') -Raw) -replace '"blocked":true', '"blocked":false' | Set-Content -Path (Join-Path $Work 'status-hold.json') -Encoding UTF8
+  Hasnt 'a held key never reports recovered'             'recovered — ineligible' (HA $liveEnv)
+  $st = @(Get-Content (Join-Path $hd '.alert-state') -ErrorAction SilentlyContinue | Where-Object { $_ -like "ineligible`t*" })
+  Check 'its state is carried forward'                   $st.Count 1
+  [void](HA $liveEnv -Release -Key ineligible)
+  Has   'after release it resolves normally'             'recovered — ineligible' (HA $liveEnv)
+  "dashboard-unreachable`t1`told hold" | Set-Content -Path (Join-Path $hd '.alert-hold') -Encoding UTF8
+  Has   'an expired hold does not suppress'              'Dashboard API did not answer' (HA $deadEnv)
+  Has   '-Release clears everything'                     'released all holds' (HA $deadEnv -Release)
+
+  # A hold that cannot be written must say so and fail -- never print "held".
+  # A file standing where the state directory should be makes the write fail.
+  $blocker = Join-Path $hd 'blocker'; Set-Content -Path $blocker -Value 'x'
+  $roEnv = Join-Path $hd 'ro.env'
+  "XL1_ALERT_URL=http://127.0.0.1:$DeadPort/status.json`nXL1_ALERT_STATE=$blocker\sub\.alert-state`nXL1_ALERT_NAME=testnode" | Set-Content -Path $roEnv -Encoding UTF8
+  $old = $env:XL1_ALERT_ENV; $env:XL1_ALERT_ENV = $roEnv
+  try { $o = (& powershell -NoProfile -ExecutionPolicy Bypass -File $Alert -Hold dashboard-unreachable -Minutes 5 -Reason 'unwritable' *>&1 | Out-String); $rc = $LASTEXITCODE } finally { $env:XL1_ALERT_ENV = $old }
+  Check 'an unwritable hold exits nonzero'               $rc 1
+  Has   'and says no hold is active'                     'NO hold is active' $o
+  Hasnt 'and never claims success'                       'held dashboard-unreachable for' $o
+
   $out = A -Status
   Has 'real conditions are detected'  'ineligible'    $out
   Has 'version lag is detected'       'cli-behind'    $out

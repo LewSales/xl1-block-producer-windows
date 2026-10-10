@@ -230,9 +230,16 @@ test('the mount remedy is the one for the host it is printed on', () => {
 test('a blocked producer surfaces every real fault', async () => {
   baselineHealthyState()
   await loadSnapshot('blocked.json')
-  const o = m.overall()
+  // Past the dashboard's own warm-up, so missing chain evidence is a fact
+  // about the chain reading, not about a process that just started.
+  const started = m.state.startedAt
+  m.state.startedAt = new Date(Date.now() - 3_600_000).toISOString()
+  let o
+  try { o = m.overall() } finally { m.state.startedAt = started }
   const joined = o.problems.join(' | ')
-  assert.match(joined, /ineligible/i)
+  // No chain reading in this fixture: the complaint is shown, and labelled as
+  // the node's own unverified report rather than as an established cause.
+  assert.match(joined, /reports not on the allowed-producer list — unverified/)
   assert.match(joined, /5\.2\.2 behind published 5\.3\.0/)
   assert.match(joined, /security update/i)
   assert.match(joined, /reboot required/i)
@@ -960,7 +967,7 @@ test('streaks count blocks since the last win, oldest-first ring', () => {
 test('the snapshot carries a build identity', () => {
   const b = m.snapshot().build
   assert.ok(b, 'every snapshot must identify the build serving it')
-  assert.equal(b.version, '2.3.0', 'read from package.json, not hardcoded')
+  assert.equal(b.version, '2.3.2', 'read from package.json, not hardcoded')
   // Unstamped in the test environment, which is exactly the fallback path an
   // argument-less `docker build` takes.
   assert.equal(b.commit, 'unknown')
@@ -1742,4 +1749,180 @@ test('once the collector reports, the real host figures take over', async () => 
   assert.equal(s.hostUnavailable, undefined)
   assert.equal(s.hostname, 'REAL-PC')
   assert.equal(s.memory.totalBytes, 16890322944)
+})
+
+// ------------------------------------------------- eligibility vs the chain
+// 2026-10-10: on Mainnet the Pi logged "Producer … has insufficient stake" about
+// itself ~12 times an hour while landing ~1 block in 5, and the page and the
+// alerter reported "Producer cannot produce". Each case below is one failure
+// category with the evidence that defines it. Real readings from 18:53Z:
+// height 1756396, own block 1756385.
+
+const HOUR = 3_600_000
+let savedSelfRecord
+function scenario({ complaint = 'insufficient-stake', running = true, chain = 'fresh', current = 1756396, lastOwn = 1756385, behind = 0, warm = true, record = 0 } = {}) {
+  baselineHealthyState()
+  // This node's persisted production record (peers.json counts).
+  savedSelfRecord = m.peers.get(SELF)
+  if (record) m.peers.set(SELF, record); else m.peers.delete(SELF)
+  m.state.startedAt = new Date(Date.now() - (warm ? HOUR : 1000)).toISOString()
+  const reasons = { 'insufficient-stake': 'insufficient stake', 'not-allowed': 'not on the allowed-producer list' }
+  m.state.node = {
+    ok: true, stale: false, collectedAt: new Date().toISOString(),
+    container: { running },
+    eligibility: complaint ? { blocked: true, key: complaint, reason: reasons[complaint], window: '20m' } : { blocked: false },
+    eligibilityIgnored: false,
+  }
+  const polledAt = chain === 'stale' ? new Date(Date.now() - 10 * 60_000).toISOString() : new Date().toISOString()
+  m.state.chain = chain === 'down'
+    ? { ok: false, error: 'fetch failed', polledAt }
+    : { ok: true, chainIdMatchesPreset: true, balances: {}, currentBlock: current, polledAt }
+  Object.assign(m.production, { lastBlock: lastOwn === null ? undefined : lastOwn, behind })
+}
+function reset() {
+  Object.assign(m.production, { lastBlock: undefined, behind: undefined }); m.state.startedAt = new Date().toISOString()
+  if (savedSelfRecord === undefined) m.peers.delete(SELF); else m.peers.set(SELF, savedSelfRecord)
+}
+const run = (opts) => { scenario(opts); try { return { o: m.overall(), n: m.snapshot().node, v: m.eligibilityVerdict() } } finally { reset() } }
+const has = (o, re) => o.problems.some((p) => re.test(p))
+
+test('normal production with a stake complaint: contradicted, no fault, no page', () => {
+  const { o, n, v } = run({})
+  assert.equal(v.category, 'contradicted')
+  assert.equal(o.status, 'ok', JSON.stringify(o.problems))
+  assert.equal(n.eligibilityIgnored, true, 'the alerter reads eligibilityIgnored')
+  assert.equal(n.eligibilityContradicted, true)
+  assert.match(n.eligibilityNote, /produced 11 blocks ago/)
+  assert.equal(n.eligibility.reason, 'insufficient stake', 'what the node said is still served')
+})
+
+test('normal production without any complaint: nothing to say', () => {
+  const { o, v } = run({ complaint: null })
+  assert.equal(v.category, 'none'); assert.equal(o.status, 'ok')
+})
+
+test('no recent block is NOT reported as insufficient stake', () => {
+  const { o, n, v } = run({ lastOwn: 1756396 - 500 })
+  assert.equal(v.category, 'not-landing')
+  assert.ok(has(o, /^not landing blocks: 500 blocks since/), JSON.stringify(o.problems))
+  assert.ok(!has(o, /ineligible/i), 'the complaint must not be named as the cause')
+  assert.ok(has(o, /reports insufficient stake \(unconfirmed\)/), 'the complaint is context, labelled unconfirmed')
+  assert.equal(n.eligibilityIgnored, true, 'no "cannot produce" page; the alerter’s not-producing check owns this symptom')
+})
+
+test('no block from this node ever seen: the complaint counts, worded as a self-report', () => {
+  const { o, n, v } = run({ lastOwn: null })
+  assert.equal(v.category, 'unconfirmed')
+  assert.ok(has(o, /producer ineligible: insufficient stake \(the node.s own report; no block from it seen on chain\)/), JSON.stringify(o.problems))
+  assert.equal(n.eligibilityIgnored, false, 'this is the one case the alerter should page on')
+  assert.match(n.eligibility.reason, /no block from this node has been seen on chain/, 'the page message carries the evidence')
+  assert.equal(n.eligibility.selfReport, 'insufficient stake')
+})
+
+test('stale chain data: no contradiction, stale data is its own fault', () => {
+  const { o, n, v } = run({ chain: 'stale' })
+  assert.equal(v.category, 'unverified')
+  assert.ok(has(o, /^chain data stale \(\d+ s\)/), JSON.stringify(o.problems))
+  assert.ok(has(o, /producer reports insufficient stake — unverified: chain data is \d+ s old/))
+  assert.equal(n.eligibilityContradicted, undefined, 'a frozen reading must not vouch for production')
+})
+
+test('RPC failure: chain unreachable, the complaint stays a labelled, unverified fault', () => {
+  const { o, n, v } = run({ chain: 'down' })
+  assert.equal(v.category, 'unverified')
+  assert.ok(has(o, /^chain unreachable$/))
+  assert.ok(has(o, /unverified: chain data unavailable/))
+  assert.equal(n.eligibilityIgnored, false, 'fail safe: without evidence the complaint still pages')
+  assert.match(n.eligibility.reason, /chain data unavailable/)
+})
+
+test('missing telemetry from the block scan (far behind) is not evidence either way', () => {
+  const { v } = run({ behind: 500 })
+  assert.equal(v.category, 'unverified')
+})
+
+test('a last block ahead of the chain head is not evidence', () => {
+  const { v } = run({ current: 100, lastOwn: 150 })
+  assert.equal(v.category, 'unverified')
+})
+
+test('producer shut down: no complaint-named fault; the container state is the fault', () => {
+  const { o, n, v } = run({ running: false })
+  assert.equal(v.category, 'producer-down')
+  assert.equal(o.status, 'down')
+  assert.ok(!has(o, /ineligible|reports insufficient/), JSON.stringify(o.problems))
+  assert.equal(n.eligibilityIgnored, true)
+})
+
+test('dashboard warm-up: no page before the chain has been read', () => {
+  const { o, n, v } = run({ chain: 'down', warm: false })
+  assert.equal(v.category, 'unverified')
+  assert.equal(v.counts, false)
+  assert.equal(n.eligibilityIgnored, true, 'a dashboard restart must not page "cannot produce"')
+  assert.match(n.eligibilityNote, /dashboard starting/)
+  assert.ok(has(o, /^chain unreachable$/), 'the chain problem is still shown')
+})
+
+test('the threshold is inclusive at exactly N, and N+1 is not-landing', () => {
+  assert.equal(run({ current: 1000, lastOwn: 1000 - m.ELIGIBILITY_CHAIN_BLOCKS }).v.category, 'contradicted')
+  assert.equal(run({ current: 1000, lastOwn: 1000 - m.ELIGIBILITY_CHAIN_BLOCKS - 1 }).v.category, 'not-landing')
+})
+
+test('an authorization complaint follows the same evidence rules', () => {
+  assert.equal(run({ complaint: 'not-allowed', current: 500, lastOwn: 498 }).v.category, 'contradicted')
+  assert.equal(run({ complaint: 'not-allowed', lastOwn: null }).v.category, 'unconfirmed')
+})
+
+test('the per-network ignore list still applies on its own', () => {
+  scenario({})
+  m.state.node.eligibilityIgnored = true; m.state.node.eligibilityNote = 'not enforced on sequence'
+  try {
+    const v = m.eligibilityVerdict()
+    assert.equal(v.category, 'not-enforced'); assert.equal(v.note, 'not enforced on sequence')
+    assert.equal(m.snapshot().node.eligibilityContradicted, undefined)
+  } finally { reset() }
+})
+
+test('the verdict never rewrites collected state', () => {
+  scenario({ lastOwn: null })
+  try { m.snapshot(); assert.equal(m.state.node.eligibility.reason, 'insufficient stake'); assert.equal(m.state.node.eligibilityIgnored, false) } finally { reset() }
+})
+
+// 2026-10-10, 2.3.2 rollout: ~30 s after a dashboard restart the alerter paged
+// "cannot produce ... no block from this node seen on chain" for a node that had
+// produced a block seconds earlier. The head was known, our last block not yet.
+test('after a restart, a node with a production record is never "never seen"', () => {
+  const { o, n, v } = run({ lastOwn: null, record: 7300 })
+  assert.equal(v.category, 'unverified')
+  assert.equal(v.counts, false)
+  assert.equal(n.eligibilityIgnored, true, 'the alerter must not page "cannot produce"')
+  assert.match(n.eligibilityNote, /7300 blocks on record, its latest not yet located/)
+  assert.ok(!o.problems.some((p) => /ineligible/.test(p)), JSON.stringify(o.problems))
+})
+
+test('during warm-up, no own block seen yet is not a fault either', () => {
+  const { n, v } = run({ lastOwn: null, record: 0, warm: false })
+  assert.equal(v.category, 'unverified'); assert.equal(v.counts, false)
+  assert.equal(n.eligibilityIgnored, true)
+})
+
+test('a genuinely new node with no record, after warm-up, still pages unconfirmed', () => {
+  const { n, v } = run({ lastOwn: null, record: 0, warm: true })
+  assert.equal(v.category, 'unconfirmed'); assert.equal(n.eligibilityIgnored, false)
+})
+
+test('loadPeers restores the last own block from the persisted recent strip', async () => {
+  const { mkdtemp: mt, writeFile: wf } = await import('node:fs/promises')
+  const dir = await mt(join(tmpdir(), 'xl1-peers-'))
+  const f = join(dir, 'peers.json')
+  await wf(f, JSON.stringify({ v: 3, since: new Date().toISOString(), updatedAt: new Date().toISOString(), scannedFrom: 100, scannedTo: 200, scanned: 100, counts: { [SELF]: 12 },
+    recent: [{ n: 190, mine: true, t: 1000 }, { n: 195, mine: false, t: 2000 }, { n: 198, mine: true, t: 3000 }, { n: 199, mine: false, t: 4000 }], days: {} }))
+  const was = process.env.DASH_PEERS_FILE
+  process.env.DASH_PEERS_FILE = f
+  try {
+    const fresh = await import(`../dashboard/server.mjs?peers=${Date.now()}`)
+    await fresh.loadPeers()
+    assert.equal(fresh.production.lastBlock, 198)
+    assert.equal(fresh.production.lastBlockAt, 3000)
+  } finally { if (was === undefined) delete process.env.DASH_PEERS_FILE; else process.env.DASH_PEERS_FILE = was }
 })

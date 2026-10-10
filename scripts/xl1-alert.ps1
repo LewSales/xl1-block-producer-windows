@@ -27,7 +27,14 @@
 [CmdletBinding()]
 param(
   [switch]$Test,
-  [switch]$Status
+  [switch]$Status,
+  # Maintenance holds: one named condition key, 1-60 minutes, self-expiring.
+  [string]$Hold,
+  [int]$Minutes = 0,
+  [string]$Reason,
+  [switch]$Release,
+  [string]$Key,
+  [switch]$Holds
 )
 
 # Not 'Stop'. Every delivery below is best-effort by design, and a webhook that
@@ -209,6 +216,82 @@ function Send-Alert {
   Write-AlertLog "$Priority`: $Title -- $Body"
 }
 
+# ------------------------------------------------------- maintenance holds
+#
+# The twin of xl1-alert.sh --hold. A planned restart of something this watches
+# (the dashboard) must not page as an outage, and must not be handled by
+# switching alerting off, which also silences the producer. A hold names ONE
+# condition key, lasts at most XL1_ALERT_HOLD_MAX_MINUTES (60), and expires on
+# its own; every other condition keeps firing. Keys meaning the producer itself
+# is down are refused unless XL1_ALERT_HOLD_CRITICAL=1.
+#
+#   .\xl1-alert.ps1 -Hold dashboard-unreachable -Minutes 5 -Reason 'dashboard deploy'
+#   .\xl1-alert.ps1 -Release [-Key dashboard-unreachable]
+#   .\xl1-alert.ps1 -Holds
+$HoldFile     = Join-Path (Split-Path -Parent $StateFile) '.alert-hold'
+$HoldMax      = [int](Setting 'XL1_ALERT_HOLD_MAX_MINUTES' '60')
+$CriticalKeys = @('node-down', 'container-missing', 'container-stopped')
+$holdNow      = [int][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+function Get-ActiveHolds {
+  $list = @()
+  foreach ($line in @(Get-Content -Path $HoldFile -ErrorAction SilentlyContinue)) {
+    if (-not $line) { continue }
+    $p = $line -split "`t", 3
+    $until = 0
+    if ($p.Count -ge 2 -and [int]::TryParse($p[1], [ref]$until) -and $until -gt $holdNow) {
+      $list += [pscustomobject]@{ key = $p[0]; until = $until; reason = $(if ($p.Count -ge 3) { $p[2] } else { '' }) }
+    }
+  }
+  return ,$list
+}
+function Save-Holds { param($List)
+  $d = Split-Path -Parent $HoldFile
+  if ($d -and -not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
+  $text = ($List | ForEach-Object { "$($_.key)`t$($_.until)`t$($_.reason)" }) -join "`n"
+  [System.IO.File]::WriteAllText("$HoldFile.tmp", $text, (New-Object System.Text.UTF8Encoding($false)))
+  Move-Item -Path "$HoldFile.tmp" -Destination $HoldFile -Force
+}
+if ($Hold) {
+  if ($Hold -notmatch '^[a-z0-9-]+$') { Write-Error 'xl1-alert: -Hold needs a condition key (e.g. dashboard-unreachable)'; exit 2 }
+  if ($Minutes -lt 1 -or $Minutes -gt $HoldMax) { Write-Output "xl1-alert: minutes must be 1-$HoldMax"; exit 2 }
+  if (-not $Reason) { Write-Output 'xl1-alert: give a -Reason; it is logged with the hold'; exit 2 }
+  if ($CriticalKeys -contains $Hold -and (Setting 'XL1_ALERT_HOLD_CRITICAL' '0') -ne '1') {
+    Write-Output "xl1-alert: $Hold means the producer is down; set XL1_ALERT_HOLD_CRITICAL=1 to hold it on purpose"; exit 2
+  }
+  $list = @((Get-ActiveHolds) | Where-Object { $_.key -ne $Hold })
+  $list += [pscustomobject]@{ key = $Hold; until = $holdNow + $Minutes * 60; reason = $Reason }
+  # Success only once the hold reads back as active: a failed write used to be
+  # followed by "held ...", which looks exactly like a hold protecting a deploy.
+  $written = $true
+  try { $ErrorActionPreference = 'Stop'; Save-Holds $list } catch { $written = $false } finally { $ErrorActionPreference = 'Continue' }
+  if (-not $written -or -not (@(Get-ActiveHolds) | Where-Object { $_.key -eq $Hold })) {
+    Write-Output "xl1-alert: could not write $HoldFile -- NO hold is active"; exit 1
+  }
+  Write-AlertLog "hold set: $Hold for $Minutes min ($Reason)"
+  Write-Output "held $Hold for $Minutes min ($([DateTimeOffset]::FromUnixTimeSeconds($holdNow + $Minutes * 60).ToLocalTime().ToString('o'))): $Reason"
+  exit 0
+}
+if ($Release) {
+  if ($Key -and -not (@(Get-ActiveHolds) | Where-Object { $_.key -eq $Key })) { Write-Output "no active hold on $Key"; exit 0 }
+  $written = $true
+  try {
+    $ErrorActionPreference = 'Stop'
+    if ($Key) { Save-Holds @((Get-ActiveHolds) | Where-Object { $_.key -ne $Key }) } else { Save-Holds @() }
+  } catch { $written = $false } finally { $ErrorActionPreference = 'Continue' }
+  $still = @(Get-ActiveHolds) | Where-Object { -not $Key -or $_.key -eq $Key }
+  if (-not $written -or $still) { Write-Output "xl1-alert: could not update $HoldFile -- holds are STILL active"; exit 1 }
+  if ($Key) { Write-Output "released $Key" } else { Write-Output 'released all holds' }
+  Write-AlertLog "hold released: $(if ($Key) { $Key } else { 'all' })"
+  exit 0
+}
+if ($Holds) {
+  $h = Get-ActiveHolds
+  if ($h.Count) { $h | ForEach-Object { Write-Output ("{0}`t{1}`t{2}" -f $_.key, $_.until, $_.reason) } } else { Write-Output 'no active holds' }
+  exit 0
+}
+$activeHolds = Get-ActiveHolds
+$heldKeys = @($activeHolds | ForEach-Object { $_.key })
+
 # ------------------------------------------------------------- what is true
 
 # jq's `//` operator, which every predicate below depends on. Walking the path
@@ -330,7 +413,17 @@ else {
   }
 }
 
+# Held keys are reported as held and never notified; everything else is untouched.
+$heldOut = @()
+if ($heldKeys.Count) {
+  foreach ($h in $activeHolds) { Write-AlertLog "hold active: $($h.key) until $([DateTimeOffset]::FromUnixTimeSeconds($h.until).ToString('o')) ($($h.reason))" }
+  $kept = New-Object System.Collections.Generic.List[object]
+  foreach ($c in $conditions) { if ($heldKeys -contains $c.key) { $heldOut += $c } else { $kept.Add($c) } }
+  $conditions = $kept
+}
+
 if ($Status) {
+  if ($heldOut.Count) { Write-Output 'held (not notified):'; $heldOut | ForEach-Object { Write-Output ("{0}|{1}|{2}" -f $_.key, $_.prio, $_.msg) } }
   # "Could not look" and "looked, found nothing" are different answers.
   if (-not $readable) {
     Write-Output 'COULD NOT READ STATUS'
@@ -417,6 +510,9 @@ foreach ($c in $conditions) {
 if ($readable) {
   foreach ($key in $previous.Keys) {
     if (-not $next.Contains($key)) {
+      # A held key is not observed: neither still-firing nor recovered. Carry it
+      # forward and decide when the hold ends, so a hold never fakes a recovery.
+      if ($heldKeys -contains $key) { $next[$key] = $previous[$key]; continue }
       Send-Alert 'default' "XL1 $NodeName`: recovered — $key" ("Cleared " + (Get-Date -Format 'o') + ".")
     }
   }
@@ -461,6 +557,9 @@ $statusDoc = [ordered]@{
   cooldownSeconds = $Cooldown
   stallBlocks = $StallBlocks
   launchGraceSeconds = $LaunchGrace
+  # A held alert must be visible as held, never indistinguishable from a quiet
+  # node. Keys and expiry only, no reasons.
+  holds = @($activeHolds | ForEach-Object { [ordered]@{ key = $_.key; until = $_.until } })
 }
 try {
   $statusFile = Join-Path (Split-Path -Parent $StateFile) '.alert-status'

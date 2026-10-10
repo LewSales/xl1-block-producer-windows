@@ -161,6 +161,17 @@ const ELIGIBILITY_IGNORED = (process.env.DASH_ELIGIBILITY_IGNORE ?? '')
   .split(',').map((x) => x.trim()).filter(Boolean)
 const ignoredKeys = new Set(ELIGIBILITY_IGNORED.length ? ELIGIBILITY_IGNORED : (IGNORED_BY_NETWORK[NETWORK] ?? []))
 
+// The node's complaint is its own opinion; the chain is the record. On Mainnet
+// since 2026-10-06 the Pi has logged "Producer … has insufficient stake" about
+// itself a dozen times an hour while landing about one block in five, and this
+// page and the alerter called that "Producer cannot produce". A per-network
+// ignore list cannot fix that — it would also hide the day enforcement starts.
+// So a complaint counts only when the chain does not contradict it: a block
+// signed by this node within the last N chain blocks (default 90, the alerter's
+// own stall threshold) means it can produce, whatever it says. No chain reading
+// means no contradiction, and the complaint counts.
+const ELIGIBILITY_CHAIN_BLOCKS = envNum('DASH_ELIGIBILITY_CHAIN_BLOCKS', 90)
+
 // XL1 balances are keyed by bare lowercase hex — a 0x prefix is rejected by the
 // gateway, and the env examples ship the 0x form, so normalize every address.
 const bareHex = (a) => (a ?? '').trim().replace(/^0x/i, '').toLowerCase()
@@ -964,6 +975,16 @@ async function loadPeers() {
     production.scannedFrom = doc.scannedFrom
     production.scannedTo = doc.scannedTo
     production.scanned = Number(doc.scanned) || 0
+    // The last block this node landed, from the persisted recent strip. Without
+    // it a restarted dashboard knows the head but not our last block until the
+    // scan next finds one -- and for that minute "no block of ours seen" was
+    // read as "never produced" and paged (2026-10-10, 2.3.2 rollout).
+    const ownRecent = (Array.isArray(doc.recent) ? doc.recent : []).filter((r) => r?.mine && Number.isFinite(Number(r.n)))
+    if (ownRecent.length && production.lastBlock === undefined) {
+      const last = ownRecent.reduce((a, b) => (Number(b.n) > Number(a.n) ? b : a))
+      production.lastBlock = Number(last.n)
+      if (Number.isFinite(Number(last.t))) production.lastBlockAt = Number(last.t)
+    }
     peersEvicted.addresses = Number(doc.evicted?.addresses) || 0
     peersEvicted.blocks = Number(doc.evicted?.blocks) || 0
     production.multiSigner = Boolean(doc.multiSigner)
@@ -2236,6 +2257,112 @@ async function pollSystem() {
 
 // ------------------------------------------------------------------- assembly
 
+/** Chain blocks since this node last landed one; undefined until both are read. */
+function blocksSinceOwn() {
+  return (state.chain?.currentBlock !== undefined && production.lastBlock !== undefined)
+    ? state.chain.currentBlock - Number(production.lastBlock)
+    : undefined
+}
+
+// Chain evidence older than this is not evidence. Four polls, and never under a
+// minute, so one slow poll does not flip the verdict.
+const CHAIN_FRESH_MS = Math.max(4 * CHAIN_POLL_MS, 60_000)
+// The dashboard's own warm-up: until the first chain poll and scan land, "no
+// evidence" is a fact about this process, not about the producer.
+const ELIGIBILITY_WARMUP_MS = 2 * CHAIN_FRESH_MS
+
+/** What the chain can say about this node's production right now. */
+function chainEvidence(now = Date.now()) {
+  const c = state.chain
+  if (!c?.ok || c.currentBlock === undefined) return { usable: false, why: 'chain data unavailable' }
+  const age = now - Date.parse(c.polledAt ?? 0)
+  if (!(age <= CHAIN_FRESH_MS)) return { usable: false, why: `chain data is ${Math.round(age / 1000)} s old` }
+  if ((production.behind ?? 0) > ELIGIBILITY_CHAIN_BLOCKS) return { usable: false, why: `block scan is ${production.behind} blocks behind` }
+  if (production.lastBlock === undefined) return { usable: true, sinceOwn: undefined }
+  const sinceOwn = c.currentBlock - Number(production.lastBlock)
+  if (!(sinceOwn >= 0)) return { usable: false, why: 'own block reads ahead of the chain head' }
+  return { usable: true, sinceOwn }
+}
+
+/** Classify the node's eligibility complaint against independent evidence.
+ *  Categories, each with its own evidence:
+ *    none          no complaint
+ *    producer-down container not running: the shutdown is the cause
+ *    not-enforced  this network does not enforce the complaint's rule
+ *    unverified    no fresh chain evidence; the self-report stands, labelled
+ *    contradicted  the chain shows a recent block from this node
+ *    not-landing   fresh chain, no block from this node for > N: reported as
+ *                  not landing blocks, the complaint as unconfirmed context --
+ *                  a missing block is not evidence of insufficient stake
+ *    unconfirmed   fresh chain, no block from this node ever seen: the
+ *                  complaint is the only explanation on offer, and counts
+ *  `counts` decides whether it is a fault named after the complaint. */
+function eligibilityVerdict(node = state.node, ev = chainEvidence(), now = Date.now()) {
+  const reason = node?.eligibility?.reason
+  if (!node?.eligibility?.blocked) return { category: 'none', counts: false }
+  if (node.container && node.container.running === false) {
+    return { category: 'producer-down', counts: false, note: 'the producer is not running; its last complaint is not a current fault' }
+  }
+  if (node.eligibilityIgnored) return { category: 'not-enforced', counts: false, note: node.eligibilityNote }
+  if (!ev.usable) {
+    const warming = now - Date.parse(state.startedAt ?? 0) < ELIGIBILITY_WARMUP_MS
+    return {
+      category: 'unverified',
+      counts: !warming,
+      note: warming ? 'dashboard starting: the chain has not been read yet' : `the node's own report; ${ev.why}`,
+      problem: `producer reports ${reason} — unverified: ${ev.why}`,
+    }
+  }
+  if (ev.sinceOwn === undefined) {
+    // "Not located yet" is not "never produced": a node with a production
+    // record, or a dashboard still warming up, has simply not found its latest
+    // block in this process yet.
+    const record = peers.get(PRODUCER_ADDRESS) ?? 0
+    const warming = now - Date.parse(state.startedAt ?? 0) < ELIGIBILITY_WARMUP_MS
+    if (record > 0 || warming) {
+      return {
+        category: 'unverified',
+        counts: false,
+        note: record > 0
+          ? `the node’s own report; this node has ${record} blocks on record, its latest not yet located`
+          : 'dashboard starting: the block scan has not run yet',
+      }
+    }
+    return {
+      category: 'unconfirmed',
+      counts: true,
+      note: 'the node’s own report; no block from this node has been seen on chain',
+      problem: `producer ineligible: ${reason} (the node’s own report; no block from it seen on chain)`,
+    }
+  }
+  const ago = `${ev.sinceOwn} block${ev.sinceOwn === 1 ? '' : 's'}`
+  if (ev.sinceOwn <= ELIGIBILITY_CHAIN_BLOCKS) {
+    return { category: 'contradicted', counts: false, contradicted: true, note: `the chain shows this node produced ${ago} ago` }
+  }
+  return {
+    category: 'not-landing',
+    counts: false,
+    note: `not landing blocks: last one ${ago} ago; the node reports ${reason} (unconfirmed)`,
+    problem: `not landing blocks: ${ago} since this node's last; it reports ${reason} (unconfirmed)`,
+  }
+}
+
+/** The node as served. Anything not counted as a complaint-named fault is
+ *  marked eligibilityIgnored, so the alerter (which reads it) pages only on
+ *  `unconfirmed` and `unverified`, and its message carries the evidence. The
+ *  alerter's own not-producing and producer-down checks cover the rest. */
+function nodeView() {
+  const v = eligibilityVerdict()
+  if (v.category === 'none') return state.node
+  const out = { ...state.node, eligibilityCategory: v.category }
+  if (!v.counts) Object.assign(out, { eligibilityIgnored: true, eligibilityNote: v.note })
+  if (v.contradicted) out.eligibilityContradicted = true
+  if (v.counts && v.note) {
+    out.eligibility = { ...state.node.eligibility, selfReport: state.node.eligibility.reason, reason: `${state.node.eligibility.reason} (${v.note})` }
+  }
+  return out
+}
+
 function overall() {
   const problems = []
   if (!state.health.ok) problems.push('producer health probe failing')
@@ -2268,9 +2395,18 @@ function overall() {
   if (state.chain.ok && state.chain.chainIdMatchesPreset === false) problems.push('chain id differs from preset')
 
   // A node can be up, healthy and unable to produce a single block. Nothing
-  // else on this page distinguishes that from working.
-  if (state.node.ok && state.node.eligibility?.blocked && !state.node.eligibilityIgnored) {
-    problems.push(`producer ineligible: ${state.node.eligibility.reason}`)
+  // else on this page distinguishes that from working — unless the chain shows
+  // it producing, in which case the complaint is shown but is not a fault.
+  if (state.node.ok) {
+    const v = eligibilityVerdict()
+    // Counted complaints, and the not-landing symptom (a fault in itself,
+    // named for what the chain shows rather than for what the node claims).
+    if ((v.counts || v.category === 'not-landing') && v.problem) problems.push(v.problem)
+  }
+  // Chain evidence that stopped refreshing is a fault of its own: everything
+  // computed from it -- share, last block, the verdict above -- is frozen.
+  if (state.chain.ok && state.chain.polledAt && Date.now() - Date.parse(state.chain.polledAt) > CHAIN_FRESH_MS) {
+    problems.push(`chain data stale (${Math.round((Date.now() - Date.parse(state.chain.polledAt)) / 1000)} s)`)
   }
 
   const lag = versionLag(state.node?.cliVersion, state.release?.latest)
@@ -2688,6 +2824,7 @@ const snapshot = () => ({
     }
   })(),
   ...state,
+  node: nodeView(),
   release: { ...state.release, installed: state.node?.cliVersion, lag: versionLag(state.node?.cliVersion, state.release?.latest) },
   // One board per response. It was being rebuilt three times -- once in the
   // payload and twice inside derived() -- over the same tally, for three
@@ -2936,7 +3073,7 @@ const server = createServer(async (req, res) => {
 // Docker daemon, or a Pi. `overall` and `pollNode` in particular encode the
 // contract with xl1-collect.sh, which is where two silent failures have already
 // hidden.
-export { nextReleaseDelay, CLI_RETRY_MS, CLI_CHECK_MS, formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, blockEpoch, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys, networkView, concentration, shareDrift, producerChurn, observeBatch, gapPercentile, chainObs, GAP_EDGES, sumDays, pollAlerts, prunePeers, peersEvicted, PEERS_MAX, fleetView, fleetSummary, pollFleet, fleet, FLEET, publicView, pollPrice, priceView, NO_MARKET, continuity, pollSystem, HOST_PLATFORM }
+export { eligibilityVerdict, nodeView, blocksSinceOwn, chainEvidence, ELIGIBILITY_CHAIN_BLOCKS, CHAIN_FRESH_MS, ELIGIBILITY_WARMUP_MS, nextReleaseDelay, CLI_RETRY_MS, CLI_CHECK_MS, formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, blockEpoch, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys, networkView, concentration, shareDrift, producerChurn, observeBatch, gapPercentile, chainObs, GAP_EDGES, sumDays, pollAlerts, prunePeers, peersEvicted, PEERS_MAX, fleetView, fleetSummary, pollFleet, fleet, FLEET, publicView, pollPrice, priceView, NO_MARKET, continuity, pollSystem, HOST_PLATFORM }
 
 // Only run as a server when executed directly, not when imported by a test.
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
