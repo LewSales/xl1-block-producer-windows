@@ -173,8 +173,8 @@ A bind-mounted preset is live configuration. If presets are mounted from a git w
 | Alert truth | Every alert maps to a cause an operator can act on. An alert that fires while the chain shows normal production is a defect to fix, not to mute | Law 07 |
 | Unattended change | OS updates, reboots and producer updates are written policies: what triggers them, when, how it is announced, how it is undone | Law 06 |
 | Container runtime upgrades | Treat Docker Engine or containerd package upgrades as a **producer restart**, not a background patch. Hold them from unattended upgrades, or schedule them | On a reference node, an unattended OS upgrade that included the engine restarted the producer mid-production |
-| Graceful stop | Check that a stop ends with a clean exit, not SIGKILL (exit 137). If the process ignores SIGTERM, run it under an init (`--init`) or record why not | **Cause found on the reference Pi:** the image's PID 1 (`node entrypoint.mjs`) installs no SIGTERM handler and forwards no signals to the `xl1` child. The kernel ignores unhandled signals to PID 1, so every `docker stop -t 60` waited 60 s and killed. With `--init` the stop takes ~1 s, but `xl1` is still killed, not stopped. A graceful stop needs the entrypoint to forward signals (the CLI itself does handle SIGTERM) |
-| Sidecar memory | Observers and collectors beside the producer have bounded memory and are watched like the producer. A sidecar that is OOM-killed in a loop is a defect, not noise | The reference Pi's race observer hit its 96 MiB cap and was killed and restarted 25 times in about two days. The producer was unaffected, but the observer's data had gaps |
+| Graceful stop | Check that a stop ends with a clean exit, not SIGKILL (exit 137), and that the application’s own shutdown handler actually runs | **Cause found on the reference Pi:** the image’s PID 1 (`node entrypoint.mjs`) installs no SIGTERM handler and forwards no signals to the `xl1` child, so every `docker stop -t 60` waited 60 s and killed. Tested with the real entrypoint and a stand-in CLI: `--init` stops in ~0.4 s but the CLI still never cleans up; even signalling the whole process group kills it mid-cleanup. Only an entrypoint that forwards SIGTERM let the CLI finish (exit 0).
+| Sidecar memory | Observers and collectors beside the producer have bounded memory and are watched like the producer. A sidecar that is OOM-killed in a loop is a defect, not noise. Measure against the container’s cgroup, not RSS, and check native memory, not only the JS heap | The reference Pi’s race observer was killed 25 times in about two days at 96 MiB. Its JS live set was ~19 MB; native memory retained by the C allocator plateaued near 73 MB. Capping allocator arenas brought that to ~45 MB with no limit increase
 | Thermal | Small boards: record temperature and throttle flags. Overclocks have a written rollback | Throttling silently lengthens cycles |
 | Headroom | Record free memory, swap use and disk. Act on trends, not single readings | — |
 
@@ -329,6 +329,7 @@ Each revision records what changed and why, in the history below.
 | Version | Date | Change |
 |---|---|---|
 | 1.0 (draft) | 2026-10-10 | First draft |
+| 1.0 (draft, rev. 3) | 2026-10-10 | Status legend (verified / proposed / deployed / reproduced) in Appendix A; graceful-stop and sidecar-memory findings from 002D testing; O-04 partly deployed. Still a draft |
 | 1.0 (draft, rev. 2) | 2026-10-10 | Added S-10/S-11 (secret-file permissions, backups), sidecar memory, graceful-stop cause, three incident patterns, the reproducibility protocol, Appendix A gap table, Appendix C self-assessment. Still a draft |
 
 ---
@@ -357,22 +358,31 @@ A dated record of one operator's choices, given for transparency, **not as recom
 
 No controlled comparison with 4000 or 5000 exists. 3000 is not claimed to be optimal.
 
-**Level claimed: none yet.** Known Baseline gaps (each has a prepared, unapplied change awaiting operator approval unless noted):
+**Level claimed: none yet.** Known Baseline gaps are listed below.
 
-| Gap | State on 2026-10-10 |
-|---|---|
-| B-05 | Windows main producer health is published on every interface (upstream default). Change to loopback prepared |
-| B-06 | Pi publishes peer port 30303; nothing listens on it. Removal prepared |
-| B-07 | Windows producer containers have no log rotation. Not yet prepared (needs container recreation) |
-| B-10 | Pi OS updates can upgrade the container runtime and so restart the producer; reboot policy unwritten. Policy change prepared (runtime upgrades become an operator command; reboot mode becomes a setting) |
-| B-11 | Rollback tags now exist for both running Windows images. Runbook steps for the extra containers still to be written |
-| B-12 | Protocol published ([`REPRODUCIBILITY-TEST.md`](REPRODUCIBILITY-TEST.md)); no independent run yet |
-| S-10 | Secret-file permissions not yet verified to meet S-10 on both hosts |
+**Status legend:**
+- **Verified:** observed on the reference nodes, with evidence.
+- **Proposed:** a change prepared and tested offline, not applied.
+- **Deployed:** applied to production and checked there.
+- **Reproduced:** confirmed by someone outside the project. None yet.
 
-Observed-level gaps, for completeness:
-- **O-04:** a standing false "cannot produce" alert on the Pi; root-cause fix prepared, not deployed.
-- **§8 Graceful stop:** Pi stops end in SIGKILL; `--init` prepared; a full fix needs upstream.
-- **§8 Sidecar memory:** race observer OOM loop; not yet investigated in code.
+| Gap | Finding | Remediation status (2026-10-10) |
+|---|---|---|
+| B-05 | Verified: Windows main producer health is published on every interface (upstream default) | Proposed: loopback binding, rendered and tested |
+| B-06 | Verified: Pi publishes peer port 30303; nothing listens on it, and no CLI code uses it | Proposed: removal |
+| B-07 | Verified: Windows producer containers have no log rotation | Proposed: 10 MB × 3, rendered and tested |
+| B-10 | Verified: Pi OS updates upgraded the container runtime and so restarted the producer | Proposed: runtime upgrades become an operator command; reboot mode becomes a setting; policy documented |
+| B-11 | Verified: one Windows image had no tag | **Deployed:** rollback tags for both running images. Runbook steps for the extras still to be written |
+| B-12 | — | Protocol published ([`REPRODUCIBILITY-TEST.md`](REPRODUCIBILITY-TEST.md)); no independent run yet |
+| S-10 | Verified: secret files on one host grant access to accounts other than the operator's | Proposed: least-privilege permissions, rehearsed with exact rollback |
+
+Observed-level gaps:
+
+| Gap | Finding | Remediation status |
+|---|---|---|
+| O-04 | Verified: a standing false "cannot produce" alert, raised from the node's self-report while the chain showed production | **Deployed:** chain evidence overrules a contradicted complaint (alerts cleared). Proposed: v2 classifies every case (contradicted, not landing, unverified, never seen, producer down) so a missing block is never reported as a stake problem |
+| §8 Graceful stop | Verified: every Pi stop waited the full timeout and ended in SIGKILL; PID 1 forwards no signals | Proposed: `--init` (stop in ~1 s). Verified that `--init` does **not** let the CLI clean up; only an entrypoint that forwards signals does (upstream issue drafted, not filed) |
+| §8 Sidecar memory | Verified: race observer OOM-killed repeatedly at 96 MiB. Cause, from a replay of its own data under the same limit: native memory held by the C allocator's per-thread arenas (live JS set ~19 MB), plus a small unpruned set | Proposed: allocator arena cap (plateau 73 → 45 MB) and set pruning; limit unchanged |
 
 ## Appendix B: Methods
 
@@ -385,10 +395,10 @@ Dated 2026-10-10. A self-assessment, so treat it as a claim to check, not a cert
 
 | Law | Assessment | Basis | Main gap |
 |---|---|---|---|
-| 01 Belief must be earned | Partial | Production measured from the chain; no claim of being best; the published worked example is recomputable from published input | A standing alert asserted the opposite of chain evidence (fix prepared) |
+| 01 Belief must be earned | Partial | Production measured from the chain; no claim of being best; the published worked example is recomputable from published input | A standing alert asserted the opposite of chain evidence (first fix deployed; full classification proposed) |
 | 02 Nothing comes from nowhere | Partial | Versions, image IDs, hardware and selected values are recorded with origins (Appendix A) | Per-node provenance record not yet published |
 | 03 Trust must be explained | Meets (draft) | Each requirement states its reason; methods have reference implementations and tests | Independent reproduction not yet done (B-12) |
 | 04 Behind every record is a person | Partial | Secrets kept out of git by test; public output is a projection; unknown producers stay unattributed | Health endpoint and a peer port exposed beyond need; S-10 unverified |
 | 05 The mission outlives the methods | Meets (draft) | Versioned standard; examples confined to appendices; tests key off values, not versions | — |
 | 06 People remain responsible | Gap | Producer updates are gated by a manifest the operator controls | OS updates restarted a producer with no human decision (policy change prepared) |
-| 07 Solve causes, not symptoms | Partial | Share "decline", exit 137 and the false alert each traced to a cause before any change | Graceful shutdown needs an upstream fix; sidecar OOM cause not yet found |
+| 07 Solve causes, not symptoms | Partial | Share "decline", exit 137 and the false alert each traced to a cause before any change | Graceful shutdown needs an upstream fix; sidecar memory fix proposed, not applied |
