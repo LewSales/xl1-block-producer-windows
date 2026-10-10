@@ -164,6 +164,17 @@ if (-not $node) {
   }
 }
 
+# ------------------------------------------------------------- shipped config
+# Presets, bindings and what git would commit. Reads files only; safe on a
+# producing host.
+Step 'Shipped config'
+if (-not $node) {
+  Skip 'node not on PATH; config tests skipped'
+} else {
+  & node --test (Join-Path $Root 'tests\config.test.mjs')
+  if ($LASTEXITCODE -eq 0) { Ok 'config tests passed' } else { Bad 'config tests failed' }
+}
+
 Write-Host ''
 if ($script:Failed) {
   Write-Host "$($script:Failed) check(s) failed`n" -ForegroundColor Red

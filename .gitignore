@@ -1,5 +1,8 @@
 # Real operator config. Only the .template files belong in git.
+# *.env.* catches the copies people make before an edit (x.env.bak, x.env.old,
+# x.env.bak-<reason>): a backup of a secret is the same secret.
 *.env
+*.env.*
 !*.env.template
 
 # Fetched at setup time, not vendored.
