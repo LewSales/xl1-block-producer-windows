@@ -160,6 +160,7 @@ A bind-mounted preset is live configuration. If presets are mounted from a git w
 | S-9 | Key exposure is handled by a written decision (rotate, or accept and monitor) with its reasoning. It is not reflexive. |
 | S-10 | Secret files, and every copy or backup of them, grant access only to the operator account and the system. Check the file permissions themselves, not only the folder's: tools that run under their own accounts (agents, sandboxes, sync clients) can hold grants on individual files. Re-check after installing such tools. |
 | S-11 | A backup of a secret is the same secret. It lives outside the repository tree, with the same permissions as S-10. It is moved only after the copy is verified, and recovery from it has been tested. |
+| S-12 | Risks the operator decides to accept (for example a known historical exposure that is not remediated by rotation) are written in a private risk register with the decision, its date and what would reopen it. The public record states only that such a register exists. Accepting a risk is never the same as asserting it did not materialise |
 
 ## 8. Runtime health and reliability
 
@@ -171,6 +172,7 @@ A bind-mounted preset is live configuration. If presets are mounted from a git w
 | Health | Liveness and readiness endpoints probed on loopback | Detects a dead process. It does **not** detect "alive but not producing" |
 | Production liveness | An alert on "no finalized blocks from this address for N expected intervals", from chain data | The only signal that matches the goal |
 | Alert truth | Every alert maps to a cause an operator can act on. An alert that fires while the chain shows normal production is a defect to fix, not to mute | Law 07 |
+| Planned maintenance | A planned restart of anything the alerter watches uses a **selective, time-bounded hold** on the specific conditions it will cause, set before and released after verification. Never switch alerting off globally; holds expire on their own, are visible while active, and cannot hide a different failure | On 2026-10-10 a dashboard restart on a reference node paged an outage because no hold existed; the alerters now support one named key, at most 60 minutes, with producer-down keys refused unless explicitly overridden |
 | Unattended change | OS updates, reboots and producer updates are written policies: what triggers them, when, how it is announced, how it is undone | Law 06 |
 | Container runtime upgrades | Treat Docker Engine or containerd package upgrades as a **producer restart**, not a background patch. Hold them from unattended upgrades, or schedule them | On a reference node, an unattended OS upgrade that included the engine restarted the producer mid-production |
 | Graceful stop | Check that a stop ends with a clean exit, not SIGKILL (exit 137), and that the application’s own shutdown handler actually runs | **Cause found on the reference Pi:** the image’s PID 1 (`node entrypoint.mjs`) installs no SIGTERM handler and forwards no signals to the `xl1` child, so every `docker stop -t 60` waited 60 s and killed. Tested with the real entrypoint and a stand-in CLI: `--init` stops in ~0.4 s but the CLI still never cleans up; even signalling the whole process group kills it mid-cleanup. Only an entrypoint that forwards SIGTERM let the CLI finish (exit 0).
@@ -288,6 +290,7 @@ Three Oxyon-defined levels. Each includes the previous one. **These are not XYO 
 | B-11 | Rollback documented with a tagged previous image | 06 | image list + runbook |
 | B-12 | Reproducibility test: a third party completed §4 from the docs | 03 | signed-off record |
 | B-13 | Non-affiliation disclaimer present in public material | 01 | docs check |
+| B-14 | Planned maintenance uses selective, bounded alert holds; an accepted-risk register exists (S-12) | 06 | alerter capability + register |
 
 ### Observed: Baseline plus reliable metrics and explainable performance
 
@@ -329,6 +332,7 @@ Each revision records what changed and why, in the history below.
 | Version | Date | Change |
 |---|---|---|
 | 1.0 (draft) | 2026-10-10 | First draft |
+| 1.0 (draft, rev. 4) | 2026-10-10 | S-12 accepted-risk register, B-14 and the planned-maintenance practice (selective holds); S-10 deployed on one host. Still a draft |
 | 1.0 (draft, rev. 3) | 2026-10-10 | Status legend (verified / proposed / deployed / reproduced) in Appendix A; graceful-stop and sidecar-memory findings from 002D testing; O-04 partly deployed. Still a draft |
 | 1.0 (draft, rev. 2) | 2026-10-10 | Added S-10/S-11 (secret-file permissions, backups), sidecar memory, graceful-stop cause, three incident patterns, the reproducibility protocol, Appendix A gap table, Appendix C self-assessment. Still a draft |
 
@@ -372,9 +376,10 @@ No controlled comparison with 4000 or 5000 exists. 3000 is not claimed to be opt
 | B-06 | Verified: Pi publishes peer port 30303; nothing listens on it, and no CLI code uses it | Proposed: removal |
 | B-07 | Verified: Windows producer containers have no log rotation | Proposed: 10 MB × 3, rendered and tested |
 | B-10 | Verified: Pi OS updates upgraded the container runtime and so restarted the producer | Proposed: runtime upgrades become an operator command; reboot mode becomes a setting; policy documented |
-| B-11 | Verified: one Windows image had no tag | **Deployed:** rollback tags for both running images. Runbook steps for the extras still to be written |
+| B-11 | Verified: one Windows image had no tag | **Deployed:** rollback tags for both running images, verified against the running image IDs. Runbook steps for the extras still to be written |
+| B-14 | Verified: no selective hold existed; a dashboard restart paged | Proposed: holds implemented and tested on both alerters (2.3.2), not deployed |
 | B-12 | — | Protocol published ([`REPRODUCIBILITY-TEST.md`](REPRODUCIBILITY-TEST.md)); no independent run yet |
-| S-10 | Verified: secret files on one host grant access to accounts other than the operator's | Proposed: least-privilege permissions, rehearsed with exact rollback |
+| S-10 | Verified: secret files on one host granted access to accounts other than the operator’s | **Deployed on that host (2026-10-10):** permissions reduced to the operator and the system, folder protected so new files inherit nothing else, exact rollback record kept; scheduled tasks and producers verified unaffected. The other host not yet assessed |
 
 Observed-level gaps:
 
