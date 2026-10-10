@@ -207,6 +207,17 @@ XL1_ALERT_NAME=testnode
   Has   'an expired hold does not suppress'              'Dashboard API did not answer' (HA $deadEnv)
   Has   '-Release clears everything'                     'released all holds' (HA $deadEnv -Release)
 
+  # A hold that cannot be written must say so and fail -- never print "held".
+  # A file standing where the state directory should be makes the write fail.
+  $blocker = Join-Path $hd 'blocker'; Set-Content -Path $blocker -Value 'x'
+  $roEnv = Join-Path $hd 'ro.env'
+  "XL1_ALERT_URL=http://127.0.0.1:$DeadPort/status.json`nXL1_ALERT_STATE=$blocker\sub\.alert-state`nXL1_ALERT_NAME=testnode" | Set-Content -Path $roEnv -Encoding UTF8
+  $old = $env:XL1_ALERT_ENV; $env:XL1_ALERT_ENV = $roEnv
+  try { $o = (& powershell -NoProfile -ExecutionPolicy Bypass -File $Alert -Hold dashboard-unreachable -Minutes 5 -Reason 'unwritable' *>&1 | Out-String); $rc = $LASTEXITCODE } finally { $env:XL1_ALERT_ENV = $old }
+  Check 'an unwritable hold exits nonzero'               $rc 1
+  Has   'and says no hold is active'                     'NO hold is active' $o
+  Hasnt 'and never claims success'                       'held dashboard-unreachable for' $o
+
   $out = A -Status
   Has 'real conditions are detected'  'ineligible'    $out
   Has 'version lag is detected'       'cli-behind'    $out

@@ -260,14 +260,27 @@ if ($Hold) {
   }
   $list = @((Get-ActiveHolds) | Where-Object { $_.key -ne $Hold })
   $list += [pscustomobject]@{ key = $Hold; until = $holdNow + $Minutes * 60; reason = $Reason }
-  Save-Holds $list
+  # Success only once the hold reads back as active: a failed write used to be
+  # followed by "held ...", which looks exactly like a hold protecting a deploy.
+  $written = $true
+  try { $ErrorActionPreference = 'Stop'; Save-Holds $list } catch { $written = $false } finally { $ErrorActionPreference = 'Continue' }
+  if (-not $written -or -not (@(Get-ActiveHolds) | Where-Object { $_.key -eq $Hold })) {
+    Write-Output "xl1-alert: could not write $HoldFile -- NO hold is active"; exit 1
+  }
   Write-AlertLog "hold set: $Hold for $Minutes min ($Reason)"
   Write-Output "held $Hold for $Minutes min ($([DateTimeOffset]::FromUnixTimeSeconds($holdNow + $Minutes * 60).ToLocalTime().ToString('o'))): $Reason"
   exit 0
 }
 if ($Release) {
-  if ($Key) { Save-Holds @((Get-ActiveHolds) | Where-Object { $_.key -ne $Key }); Write-Output "released $Key" }
-  else { Save-Holds @(); Write-Output 'released all holds' }
+  if ($Key -and -not (@(Get-ActiveHolds) | Where-Object { $_.key -eq $Key })) { Write-Output "no active hold on $Key"; exit 0 }
+  $written = $true
+  try {
+    $ErrorActionPreference = 'Stop'
+    if ($Key) { Save-Holds @((Get-ActiveHolds) | Where-Object { $_.key -ne $Key }) } else { Save-Holds @() }
+  } catch { $written = $false } finally { $ErrorActionPreference = 'Continue' }
+  $still = @(Get-ActiveHolds) | Where-Object { -not $Key -or $_.key -eq $Key }
+  if (-not $written -or $still) { Write-Output "xl1-alert: could not update $HoldFile -- holds are STILL active"; exit 1 }
+  if ($Key) { Write-Output "released $Key" } else { Write-Output 'released all holds' }
   Write-AlertLog "hold released: $(if ($Key) { $Key } else { 'all' })"
   exit 0
 }
