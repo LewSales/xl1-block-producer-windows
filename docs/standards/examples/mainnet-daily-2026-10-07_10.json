@@ -1,0 +1,58 @@
+{
+ "_about": "Sample input for Method M1 (docs/standards/methods/daily-share.md). Per-UTC-day finalized-block counts by producer address on XL1 Mainnet, from one node’s chain scan (peers.json v3), reduced to the fields M1 reads. Public chain data only.",
+ "v": 3,
+ "since": "2026-10-07T01:53:24.884Z",
+ "updatedAt": "2026-10-10T18:52:04.949Z",
+ "days": {
+  "2026-10-07": {
+   "scanned": 8967,
+   "counts": {
+    "ca08120874f071739d932b24da41cc13299123b3": 2027,
+    "fb4c535221f91c1811bd42f70b6ec305aa658551": 1679,
+    "30251291ac55017d90a3c892ab5604bdacf9bcde": 1481,
+    "3c4ef49e493d8d1800b62fc032372d8572abd8e1": 1382,
+    "cd8f4d09564ae6a9c90f05c8bc31197c651f5f18": 1250,
+    "7bbf96a1eca9db6a170f7cc0851bd136830f8581": 1148
+   }
+  },
+  "2026-10-08": {
+   "scanned": 11824,
+   "counts": {
+    "ca08120874f071739d932b24da41cc13299123b3": 2625,
+    "fb4c535221f91c1811bd42f70b6ec305aa658551": 2241,
+    "3c4ef49e493d8d1800b62fc032372d8572abd8e1": 1988,
+    "cd8f4d09564ae6a9c90f05c8bc31197c651f5f18": 1948,
+    "30251291ac55017d90a3c892ab5604bdacf9bcde": 1607,
+    "7bbf96a1eca9db6a170f7cc0851bd136830f8581": 1415
+   }
+  },
+  "2026-10-09": {
+   "scanned": 9367,
+   "counts": {
+    "ca08120874f071739d932b24da41cc13299123b3": 1825,
+    "fb4c535221f91c1811bd42f70b6ec305aa658551": 1636,
+    "30251291ac55017d90a3c892ab5604bdacf9bcde": 1361,
+    "3c4ef49e493d8d1800b62fc032372d8572abd8e1": 1213,
+    "cd8f4d09564ae6a9c90f05c8bc31197c651f5f18": 1185,
+    "7bbf96a1eca9db6a170f7cc0851bd136830f8581": 1055,
+    "c3d1a1c9781a41e69c0d0892ac6541f50151979f": 447,
+    "2152e6aec996742fb6e52ae1aad87bd44f2ccc91": 426,
+    "a6567633ac83a7017f3a2ef20fbbed890a2adae9": 219
+   }
+  },
+  "2026-10-10": {
+   "scanned": 5014,
+   "counts": {
+    "30251291ac55017d90a3c892ab5604bdacf9bcde": 701,
+    "ca08120874f071739d932b24da41cc13299123b3": 650,
+    "fb4c535221f91c1811bd42f70b6ec305aa658551": 618,
+    "a6567633ac83a7017f3a2ef20fbbed890a2adae9": 598,
+    "c3d1a1c9781a41e69c0d0892ac6541f50151979f": 546,
+    "2152e6aec996742fb6e52ae1aad87bd44f2ccc91": 529,
+    "3c4ef49e493d8d1800b62fc032372d8572abd8e1": 493,
+    "7bbf96a1eca9db6a170f7cc0851bd136830f8581": 454,
+    "cd8f4d09564ae6a9c90f05c8bc31197c651f5f18": 425
+   }
+  }
+ }
+}

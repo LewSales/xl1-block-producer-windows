@@ -32,6 +32,7 @@
 
 Appendix A: [Selected configuration of the Oxyon reference nodes](#appendix-a-selected-configuration-of-the-oxyon-reference-nodes)
 Appendix B: [Methods](#appendix-b-methods)
+Appendix C: [Seven Laws self-assessment](#appendix-c-seven-laws-self-assessment-of-the-reference-nodes)
 
 Requirement keywords: **MUST** is required for the level it belongs to. **SHOULD** is expected unless you record why not. **MAY** is optional.
 
@@ -109,7 +110,7 @@ An operator who has never spoken to us MUST be able to go from a clean host to a
 | 4.6 | **Verify on chain, not in logs** | Within your network's expected window, blocks signed by your producer address appear in the finalized chain. A "published" log line means *submitted*, not *accepted* |
 | 4.7 | Run the repository's offline tests | All pass (they read files only, so they are safe on a producing host) |
 
-**Reproducibility test.** The standard is only met if a third party can complete 4.1 to 4.7 from the documentation alone. Record who tried and what they had to ask (see §14, B-12).
+**Reproducibility test.** The standard is only met if a third party can complete 4.1 to 4.7 from the documentation alone. The protocol, with a report template, is [`REPRODUCIBILITY-TEST.md`](REPRODUCIBILITY-TEST.md). Record who tried and what they had to ask (see §14, B-12).
 
 ## 5. Configuration provenance
 
@@ -157,6 +158,8 @@ A bind-mounted preset is live configuration. If presets are mounted from a git w
 | S-7 | Dashboards on a LAN interface are restricted by host firewall to the LAN and overlay. Remember that on Linux, Docker-published ports bypass `ufw` rules. |
 | S-8 | Public status output is a projection: no hostnames, internal addresses, paths or problem text that reveals infrastructure. A test proves it. |
 | S-9 | Key exposure is handled by a written decision (rotate, or accept and monitor) with its reasoning. It is not reflexive. |
+| S-10 | Secret files, and every copy or backup of them, grant access only to the operator account and the system. Check the file permissions themselves, not only the folder's: tools that run under their own accounts (agents, sandboxes, sync clients) can hold grants on individual files. Re-check after installing such tools. |
+| S-11 | A backup of a secret is the same secret. It lives outside the repository tree, with the same permissions as S-10. It is moved only after the copy is verified, and recovery from it has been tested. |
 
 ## 8. Runtime health and reliability
 
@@ -170,7 +173,8 @@ A bind-mounted preset is live configuration. If presets are mounted from a git w
 | Alert truth | Every alert maps to a cause an operator can act on. An alert that fires while the chain shows normal production is a defect to fix, not to mute | Law 07 |
 | Unattended change | OS updates, reboots and producer updates are written policies: what triggers them, when, how it is announced, how it is undone | Law 06 |
 | Container runtime upgrades | Treat Docker Engine or containerd package upgrades as a **producer restart**, not a background patch. Hold them from unattended upgrades, or schedule them | On a reference node, an unattended OS upgrade that included the engine restarted the producer mid-production |
-| Graceful stop | Check that a stop ends with a clean exit, not SIGKILL (exit 137). If the process ignores SIGTERM, run it under an init (`--init`) or record why not | A killed producer may drop an in-flight candidate. On the reference Pi, every stop so far has ended in exit 137 |
+| Graceful stop | Check that a stop ends with a clean exit, not SIGKILL (exit 137). If the process ignores SIGTERM, run it under an init (`--init`) or record why not | **Cause found on the reference Pi:** the image's PID 1 (`node entrypoint.mjs`) installs no SIGTERM handler and forwards no signals to the `xl1` child. The kernel ignores unhandled signals to PID 1, so every `docker stop -t 60` waited 60 s and killed. With `--init` the stop takes ~1 s, but `xl1` is still killed, not stopped. A graceful stop needs the entrypoint to forward signals (the CLI itself does handle SIGTERM) |
+| Sidecar memory | Observers and collectors beside the producer have bounded memory and are watched like the producer. A sidecar that is OOM-killed in a loop is a defect, not noise | The reference Pi's race observer hit its 96 MiB cap and was killed and restarted 25 times in about two days. The producer was unaffected, but the observer's data had gaps |
 | Thermal | Small boards: record temperature and throttle flags. Overclocks have a written rollback | Throttling silently lengthens cycles |
 | Headroom | Record free memory, swap use and disk. Act on trends, not single readings | — |
 
@@ -232,7 +236,9 @@ Don't benchmark resource-intensive workloads on a producing host without the ope
 | All producers on a network stop | Upstream status; RPC schema or endpoint change | 2026-09-02: an RPC schema change stopped producers reading the chain over RPC. The REST role kept reading |
 | Cycle p95 jumps | Segment timings (`headFetch`, `timePayloadGeneration`) | EVM/RPC endpoint latency, host throttling, swap |
 | Container restarting | `docker logs` (rotated), memory, disk | OOM, full disk |
-| Alert fires, chain normal | The alert's input versus chain truth | Defective alert: fix its cause |
+| Alert fires, chain normal | The alert's input versus chain truth | Defective alert: fix its cause. Reference case: "Producer cannot produce" from the node's own "insufficient stake" log line, on a network where the chain showed it producing. The fix lets chain evidence overrule the self-report, rather than muting the key per network |
+| Every stop takes the full timeout and exits 137 | PID 1 inside the container; `docker stop` timeout; `OOMKilled` | Unhandled SIGTERM in PID 1 (see §8, "Graceful stop"). Check `OOMKilled` and kernel OOM lines before assuming memory |
+| Producer restarted with no one acting | Service journal around the time; package log | An OS update upgraded the container runtime, which restarted Docker and, through the unit's dependency on it, the producer |
 
 Recovery order:
 1. Confirm on chain.
@@ -323,6 +329,7 @@ Each revision records what changed and why, in the history below.
 | Version | Date | Change |
 |---|---|---|
 | 1.0 (draft) | 2026-10-10 | First draft |
+| 1.0 (draft, rev. 2) | 2026-10-10 | Added S-10/S-11 (secret-file permissions, backups), sidecar memory, graceful-stop cause, three incident patterns, the reproducibility protocol, Appendix A gap table, Appendix C self-assessment. Still a draft |
 
 ---
 
@@ -350,14 +357,38 @@ A dated record of one operator's choices, given for transparency, **not as recom
 
 No controlled comparison with 4000 or 5000 exists. 3000 is not claimed to be optimal.
 
-**Level claimed: none yet.** Known Baseline gaps:
-- B-06 (Pi peer port);
-- B-07 (Windows producer log rotation);
-- B-10 (unattended-update policies to be written down; the Pi's OS updates currently include the container runtime);
-- B-11 (two Windows containers run an untagged image);
-- B-12 (no third-party reproduction yet).
+**Level claimed: none yet.** Known Baseline gaps (each has a prepared, unapplied change awaiting operator approval unless noted):
+
+| Gap | State on 2026-10-10 |
+|---|---|
+| B-05 | Windows main producer health is published on every interface (upstream default). Change to loopback prepared |
+| B-06 | Pi publishes peer port 30303; nothing listens on it. Removal prepared |
+| B-07 | Windows producer containers have no log rotation. Not yet prepared (needs container recreation) |
+| B-10 | Pi OS updates can upgrade the container runtime and so restart the producer; reboot policy unwritten. Policy change prepared (runtime upgrades become an operator command; reboot mode becomes a setting) |
+| B-11 | Rollback tags now exist for both running Windows images. Runbook steps for the extra containers still to be written |
+| B-12 | Protocol published ([`REPRODUCIBILITY-TEST.md`](REPRODUCIBILITY-TEST.md)); no independent run yet |
+| S-10 | Secret-file permissions not yet verified to meet S-10 on both hosts |
+
+Observed-level gaps, for completeness:
+- **O-04:** a standing false "cannot produce" alert on the Pi; root-cause fix prepared, not deployed.
+- **§8 Graceful stop:** Pi stops end in SIGKILL; `--init` prepared; a full fix needs upstream.
+- **§8 Sidecar memory:** race observer OOM loop; not yet investigated in code.
 
 ## Appendix B: Methods
 
-- **M1: Daily share and ratio to even split:** [`methods/daily-share.md`](methods/daily-share.md). Reference implementation: [`scripts/share-by-day.mjs`](../../scripts/share-by-day.mjs).
+- **M1: Daily share and ratio to even split:** [`methods/daily-share.md`](methods/daily-share.md). Reference implementation: [`scripts/share-by-day.mjs`](../../scripts/share-by-day.mjs). Sample input for the worked example: [`examples/mainnet-daily-2026-10-07_10.json`](examples/mainnet-daily-2026-10-07_10.json). A test recomputes the published table from it.
 - **M2: Producer statistics snapshot:** [`scripts/xl1-perf-snapshot.ps1`](../../scripts/xl1-perf-snapshot.ps1). Read-only; reads the loopback statistics endpoint and the collector's files.
+
+## Appendix C: Seven Laws self-assessment of the reference nodes
+
+Dated 2026-10-10. A self-assessment, so treat it as a claim to check, not a certification.
+
+| Law | Assessment | Basis | Main gap |
+|---|---|---|---|
+| 01 Belief must be earned | Partial | Production measured from the chain; no claim of being best; the published worked example is recomputable from published input | A standing alert asserted the opposite of chain evidence (fix prepared) |
+| 02 Nothing comes from nowhere | Partial | Versions, image IDs, hardware and selected values are recorded with origins (Appendix A) | Per-node provenance record not yet published |
+| 03 Trust must be explained | Meets (draft) | Each requirement states its reason; methods have reference implementations and tests | Independent reproduction not yet done (B-12) |
+| 04 Behind every record is a person | Partial | Secrets kept out of git by test; public output is a projection; unknown producers stay unattributed | Health endpoint and a peer port exposed beyond need; S-10 unverified |
+| 05 The mission outlives the methods | Meets (draft) | Versioned standard; examples confined to appendices; tests key off values, not versions | — |
+| 06 People remain responsible | Gap | Producer updates are gated by a manifest the operator controls | OS updates restarted a producer with no human decision (policy change prepared) |
+| 07 Solve causes, not symptoms | Partial | Share "decline", exit 137 and the false alert each traced to a cause before any change | Graceful shutdown needs an upstream fix; sidecar OOM cause not yet found |

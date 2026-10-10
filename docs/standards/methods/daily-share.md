@@ -42,7 +42,11 @@ No RPC calls are made by the method itself. The scan is already performed by the
 
 ## Worked example: Oxyon Pi node, Mainnet, 2026-10-07 to 2026-10-10
 
-Output of the reference implementation on the node's own scan. The addresses are public producer addresses.
+Output of the reference implementation on the node's own scan. The addresses are public producer addresses. The input is published, so you can recompute the table:
+
+```
+node scripts/share-by-day.mjs --peers docs/standards/examples/mainnet-daily-2026-10-07_10.json --self ca08120874f071739d932b24da41cc13299123b3
+```
 
 ```
 day          blocks  producers  even%   self%  ratio  entered / left

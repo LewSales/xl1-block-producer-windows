@@ -53,3 +53,28 @@ test('without --self the table still describes the network', () => {
 test('an unknown file shape is refused rather than guessed at', () => {
   assert.throws(() => dailyShare({ v: 2, days: {} }), /v3/)
 })
+
+test('the worked example in the method doc is what the sample data produces', async () => {
+  // R-04: the published table must be recomputable by anyone from the
+  // published input. Parse the doc's table and recompute it.
+  const { readFileSync } = await import('node:fs')
+  const { fileURLToPath } = await import('node:url')
+  const at = (p) => fileURLToPath(new URL(p, import.meta.url))
+  const doc = readFileSync(at('../docs/standards/methods/daily-share.md'), 'utf8')
+  const sample = JSON.parse(readFileSync(at('../docs/standards/examples/mainnet-daily-2026-10-07_10.json'), 'utf8'))
+  const self = doc.match(/--self ([0-9a-f]{40})/)?.[1]
+  assert.ok(self, 'the doc must name the address it evaluated')
+  const rows = [...doc.matchAll(/^(\d{4}-\d{2}-\d{2})([*~ ]?)\s+(\d+)\s+(\d+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)/gm)]
+  assert.ok(rows.length >= 3, 'worked-example table not found')
+  const got = Object.fromEntries(dailyShare(sample, self).rows.map((r) => [r.day, r]))
+  for (const [, day, mark, blocks, producers, even, share, ratio] of rows) {
+    const r = got[day]
+    assert.ok(r, `${day} not in the sample`)
+    assert.equal(r.blocks, Number(blocks), `${day} blocks`)
+    assert.equal(r.producers, Number(producers), `${day} producers`)
+    assert.equal(r.evenSplitPct, Number(even), `${day} even split`)
+    assert.equal(r.selfSharePct, Number(share), `${day} share`)
+    assert.equal(r.ratioToEven, Number(ratio), `${day} ratio`)
+    assert.equal(mark.trim(), !r.complete ? '*' : r.transition ? '~' : '', `${day} marker`)
+  }
+})
