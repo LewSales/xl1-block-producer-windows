@@ -9,6 +9,11 @@
 Runs a federated Sequence block producer on a Windows PC under Docker Desktop,
 with the same dashboard as the Raspberry Pi bundle.
 
+**Why it is configured the way it is:** see the
+[Oxyon Producer Reference Standard v1.0 (draft)](docs/standards/OXYON-PRODUCER-REFERENCE-STANDARD-v1.0.md).
+It covers the reasoning, the evidence, and how to reproduce the measurements.
+It is a community reference, not an XYO standard.
+
 ## Why this exists
 
 A Raspberry Pi 3 B+ builds a block in roughly seventeen seconds against a
@@ -153,6 +158,12 @@ against a fixture served over loopback, and runs the dashboard suite against a
 stubbed SDK — no Docker, no producer, no network.
 `tests\dashboard.test.mjs` is the same file as the Pi bundle's, because
 `dashboard\` is the same source; keep it that way.
+
+Three suites read files only and are safe on a producing host:
+
+- `tests\config.test.mjs` checks the role presets: bindings, the selected interval, and that both roles agree. It also checks that no operator config or backup is committable, and that templates hold nothing secret-shaped.
+- `tests\standards.test.mjs` holds the reference standard to its own rules: links resolve, nothing secret-shaped or infrastructure-revealing appears, and no level is claimed while gaps remain.
+- `tests\share-by-day.test.mjs` checks the daily-share method's reference implementation.
 
 ## Alerts
 
@@ -345,9 +356,14 @@ address, which is the one that has to be on the list.
 The producer receives **10% of the block reward**; the remainder funds the Step
 Rewards Pool.
 
-## Why this node wins fewer blocks than a Raspberry Pi
+## Why this node won fewer blocks than a Raspberry Pi (September 2026)
 
-Because of how it reaches the internet, not because of the machine.
+> **Dated record.** Measured 2026-09-02, at a longer poll interval and on a
+> phone hotspot. Conditions have changed since: on 2026-10-10, at 3000 ms, this
+> node's `productionCycle` p95 was 1077 ms over 24 hours. Kept for its method;
+> re-measure before relying on its numbers.
+
+Because of how it reached the internet, not because of the machine.
 
 Measured 2026-09-02 against the same endpoint, from both nodes, as pure TCP
 connect time — no TLS, no HTTP, no application:

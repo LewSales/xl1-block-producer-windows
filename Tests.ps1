@@ -175,6 +175,17 @@ if (-not $node) {
   if ($LASTEXITCODE -eq 0) { Ok 'config tests passed' } else { Bad 'config tests failed' }
 }
 
+# ------------------------------------------------- reference standard + methods
+# The public standard is held to its own rules; the daily-share method's
+# reference implementation is checked on synthetic data.
+Step 'Reference standard'
+if (-not $node) {
+  Skip 'node not on PATH; standard tests skipped'
+} else {
+  & node --test (Join-Path $Root 'tests\standards.test.mjs') (Join-Path $Root 'tests\share-by-day.test.mjs')
+  if ($LASTEXITCODE -eq 0) { Ok 'standard and method tests passed' } else { Bad 'standard or method tests failed' }
+}
+
 Write-Host ''
 if ($script:Failed) {
   Write-Host "$($script:Failed) check(s) failed`n" -ForegroundColor Red
