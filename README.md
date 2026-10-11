@@ -370,7 +370,9 @@ boundary linked to XYO's block files, is at https://oxyon.io/xl1/about-data/#rew
 both networks: stake is logged, not enforced for production. The node's own
 check wants only some active stake on the producer address (one atto) before it
 re-declares its intent; the protocol's thresholds come from network
-configuration and default to zero. XYO's founder has said the requirement is
+configuration and default to zero. XYO staked to the network staking pool
+(`1969…1969`, the usual choice in the staking app) is network stake, not stake on
+the producer, so it does not silence the complaint. XYO's founder has said the requirement is
 small ("like 1000 XYO or something") and may be enforced later; no figure is
 fixed in the 5.6.2 code. Details: the Pi bundle's README, "When a healthy node
 produces nothing".
