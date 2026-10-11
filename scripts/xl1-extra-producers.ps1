@@ -9,8 +9,10 @@
   networks are separate chains, so a key never competes with itself. The rule
   that keeps that true: never two producers with one key on the SAME network.
 
-  The extras run their own image tag (xl1:5.6.1, the Pi's mainnet version) so a
-  Build.ps1 run, which retags xl1:local, never changes them by accident.
+  The extras run their own image tag (xl1:5.6.2 since 2026-10-11, the same CLI
+  as the Pi and the main node) so a Build.ps1 run, which retags xl1:local, never
+  changes them by accident. Change this default only together with an upgrade:
+  `up` without -Image recreates onto whatever it names.
 
   Same compose files and role presets as xl1ctl.ps1, separate compose project
   names, so `xl1ctl.ps1` start/stop/rollback never touch these and vice versa.
@@ -27,7 +29,7 @@
 [CmdletBinding()]
 param(
   [ValidateSet('up', 'down', 'status')][string]$Action = 'status',
-  [string]$Image = 'xl1:5.6.1',
+  [string]$Image = 'xl1:5.6.2',
   [ValidateSet('xl1-seq-23b3', 'xl1-main-cc91')][string]$Only
 )
 
