@@ -30,6 +30,21 @@ $Dash     = Join-Path $Root 'dashboard'
 function Say  { param($m, $c = 'Gray') Write-Host "  $m" -ForegroundColor $c }
 function Head { param($m) Write-Host ''; Write-Host "==> $m" -ForegroundColor Cyan }
 function Die  { param($m) Write-Host ''; Write-Host "error: $m" -ForegroundColor Red; exit 1 }
+# Windows PowerShell 5.1 turns anything a native command writes to stderr into a
+# terminating error while ErrorActionPreference is Stop -- and docker writes its
+# BuildKit progress to stderr on a perfectly good build. That aborted this script
+# straight after a successful dashboard build, skipping the smoke test below
+# (2026-10-11). Natives run under Continue, their output passed through as plain
+# text, and they are judged by exit code alone: $LASTEXITCODE is still set.
+function Invoke-Native {
+  param([scriptblock]$Command, [switch]$Quiet)
+  $eap = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    if ($Quiet) { & $Command 2>&1 | Out-Null }
+    else { & $Command 2>&1 | ForEach-Object { Write-Host "$_" } }
+  } finally { $ErrorActionPreference = $eap }
+}
 
 # Keep the newest few tagged versions, plus whatever is running and whatever
 # rollback points at, so repeated builds cannot fill Docker Desktop's disk with
@@ -92,8 +107,8 @@ if (-not $DashboardOnly) {
     # compile that dies half way through the download -- which on a slow link is
     # most of them -- resumes from what it already has instead of fetching
     # upstream's entire dev tree again.
-    & docker run --rm -e COREPACK_ENABLE_DOWNLOAD_PROMPT=0 -e PNPM_HOME=/pnpm -e npm_config_store_dir=/pnpm/store `
-      -v xl1-pnpm-store:/pnpm -v "${Upstream}:/w" -w /w $img sh -lc $cmd
+    Invoke-Native { & docker run --rm -e COREPACK_ENABLE_DOWNLOAD_PROMPT=0 -e PNPM_HOME=/pnpm -e npm_config_store_dir=/pnpm/store `
+      -v xl1-pnpm-store:/pnpm -v "${Upstream}:/w" -w /w $img sh -lc $cmd }
     if ($LASTEXITCODE -ne 0) { Die 'entrypoint compile failed' }
   }
   else { Say 'entrypoint already compiled' }
@@ -128,7 +143,7 @@ if (-not $DashboardOnly) {
     '--build-arg', ('XL1_CLI_VERSION=' + $CliVersion),
     '-t', 'xl1:local', $Upstream
   )
-  & docker @buildArgs
+  Invoke-Native { & docker @buildArgs }
   if ($LASTEXITCODE -ne 0) { Die 'producer image build failed' }
 
   # The image states its own version. Anything else is a claim about what was
@@ -182,19 +197,21 @@ if (-not $ProducerOnly) {
   $ErrorActionPreference = $eap
   if (-not $commit) { $commit = 'unknown' }
   $builtAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-  & docker build --platform $Platform --build-arg "DASH_COMMIT=$commit" --build-arg "DASH_BUILT_AT=$builtAt" -t xl1-dashboard:local $Dash
+  Invoke-Native { & docker build --platform $Platform --build-arg "DASH_COMMIT=$commit" --build-arg "DASH_BUILT_AT=$builtAt" -t xl1-dashboard:local $Dash }
   if ($LASTEXITCODE -ne 0) { Die 'dashboard image build failed' }
 
   # A 100 MB image that throws on startup is caught here or by an operator.
   Say 'smoke testing'
-  $id = (& docker run -d --rm --platform $Platform -p 127.0.0.1:18088:8088 xl1-dashboard:local 2>$null)
+  $eap = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try { $id = (& docker run -d --rm --platform $Platform -p 127.0.0.1:18088:8088 xl1-dashboard:local 2>$null) } finally { $ErrorActionPreference = $eap }
   $ok = $false
   foreach ($i in 1..30) {
     Start-Sleep -Seconds 1
     try { $null = Invoke-WebRequest -Uri 'http://127.0.0.1:18088/healthz' -TimeoutSec 2 -UseBasicParsing; $ok = $true; break }
     catch { }
   }
-  if ($id) { & docker rm -f $id 2>&1 | Out-Null }
+  if ($id) { Invoke-Native -Quiet { & docker rm -f $id } }
   if (-not $ok) { Die 'the dashboard image did not answer /healthz' }
   Say 'dashboard answers /healthz' 'Green'
 }
