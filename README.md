@@ -353,8 +353,27 @@ accepted — and upstream is explicit that `Published block: …` in the log mea
 *candidate submitted*, not accepted. `xl1ctl.ps1 addr` shows the signing
 address, which is the one that has to be on the list.
 
-The producer receives **10% of the block reward**; the remainder funds the Step
-Rewards Pool.
+Being added to the list is not the same as being picked up. This host's Mainnet
+container (key `2152…cc91`) ran from 2026-10-08 and landed nothing until block
+#1,748,314 at 2026-10-09 22:16 UTC -- eight minutes after XYO's founder said he
+had found the finalizers were not picking up newly configured producer
+addresses and had just rolled them. If an authorised address still lands
+nothing, the finalizers' configuration is worth asking about.
+
+The producer receives **10% of the block reward** today (5% before 2026-07-29 on
+Mainnet and 2026-07-28 on Sequence); the remainder funds the Step Rewards Pool.
+Read the reward from each block rather than assuming it: the table, with each
+boundary linked to XYO's block files, is at https://oxyon.io/xl1/about-data/#rewards.
+
+**Stake, as of xl1-cli 5.6.2 (checked 2026-10-11).** Every Oxyon producer logs
+`Producer … has insufficient stake.` every few hours and still lands blocks, on
+both networks: stake is logged, not enforced for production. The node's own
+check wants only some active stake on the producer address (one atto) before it
+re-declares its intent; the protocol's thresholds come from network
+configuration and default to zero. XYO's founder has said the requirement is
+small ("like 1000 XYO or something") and may be enforced later; no figure is
+fixed in the 5.6.2 code. Details: the Pi bundle's README, "When a healthy node
+produces nothing".
 
 ## Why this node won fewer blocks than a Raspberry Pi (September 2026)
 
