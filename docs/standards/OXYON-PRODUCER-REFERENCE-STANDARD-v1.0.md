@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Version** | 1.0 (draft) |
-| **Date** | 2026-10-10 |
+| **Date** | 2026-10-11 |
 | **Status** | Draft for review. Not yet published. |
 | **Applies to** | XL1 block producers run with `@xyo-network/xl1-cli` 5.6.x in Docker, on Mainnet or Sequence |
 | **Maintainer** | Oxyon (LewSales), independent community project |
@@ -141,7 +141,9 @@ A bind-mounted preset is live configuration. If presets are mounted from a git w
 | Network selection | Explicit in the env (`XL1_NETWORK`, and the chain ID where the role needs it). Never inferred. |
 | Separation | One container per (key, network). Separate env files, separate container names, separate health ports. Health ports for extra containers are published to loopback only. |
 | Same key on both networks | Possible (the reference nodes do it). Keep each pair in its own container. Running **the same key twice on the same network** is untested here: don't. |
-| Eligibility | Set by XYO (stake, allowlist). A green health check does **not** mean the producer is eligible or producing. Only finalized blocks prove production (§9). |
+| Eligibility | Set by XYO (stake, allowlist, finalizer configuration). A green health check does **not** mean the producer is eligible or producing. Only finalized blocks prove production (§9). |
+| Stake | Keep four things apart. **Stake ownership:** the positions an operator holds. **Producer-directed stake:** positions whose *staked* target is the producer address; this is the only stake the producer's own check counts (`activeByStaked(producer)`, more than zero in CLI 5.6.2). Stake in the network staking pool is network stake, not producer stake. **Intent re-declaration:** without producer-directed stake the producer skips it and logs `insufficient stake`; production continues. **Enforcement:** the protocol's thresholds come from network configuration (zero by default in 5.6.2) and were not enforced on either network as of 2026-10-11. Re-check on every release. |
+| Finalizer authorization | Separate from stake and from running. A producer added to the network's configuration may land nothing until XYO's finalizers pick the address up. Prove it by the first finalized block, not by configuration or logs. |
 | Comparisons | Never compare share across networks. Producer sets, block times and rules differ. |
 | Role choice | `producer-rest` reads the chain from REST and keeps only mempool submission on RPC; `producer` reads everything over RPC. Both role presets SHOULD carry identical actor timing, so switching role changes the data path, not the cadence. |
 
@@ -197,8 +199,21 @@ A bind-mounted preset is live configuration. If presets are mounted from a git w
 | `productionCycle` p50/p95 | Duration of one tick | same | Compare only at equal interval and producer set |
 | `headFetch`, `mempool*`, `timePayloadGeneration` | Segment durations | same | Locate where a slow cycle spends its time |
 | "Published block" log line | A submission | logs | **Not** acceptance; never use it as production |
+| **Producer reward** | The zero-address reward transfer to your reward address recorded in the block | the block | Read per block, never assumed. Rates have changed by era: block-reward steps and a producer-share change |
+| **Transaction fees** | Other transfers to your reward address inside your own blocks | the block | Counted separately from the reward |
+| **Recorded / estimated / unknown** | Read from the block / computed from the published schedule because the block could not be read / neither | accounting | Every total states which it is |
+| **Lifetime total** | The sum over every block from block 1 | full history scan | Shown only once the scan reaches block 1 and reconciles. A balance is never earnings |
 
 Telemetry follows Law 04: collect what these definitions need, keep files bounded, and publish only the projection.
+
+### 9.1 Historical scans and reconciliation
+
+1. A historical scan **MUST** be bounded: a fixed batch size, run after the live scan, outside the producer's block-production path. It **MUST** be resumable from an atomic checkpoint.
+2. It **MUST** be single-flight: no two scan steps may run at once. Overlapping steps count a batch twice. *Reference finding:* on the reference dashboards, polls overlapping a 15-second interval counted +101 (Mainnet) and +53 (Sequence) own blocks. The fix was single-flight plus a cursor re-check after every await.
+3. A batch the gateway answers only in part **MUST** be retried, never advanced past.
+4. Ranges (before the live scan, inside it, and live) **MUST** be disjoint by construction, so that no block can be counted in two of them.
+5. Totals **MUST** be reconciled against an independent source before they are published: a count of the network's own block files over the same range. *Reference:* Mainnet 7,426 = 7,426. Sequence 10,681 = 10,681, where the live counter read 10,683 (+2, from the same overlap before the fix).
+6. A reward balance **MUST NOT** be presented as earnings. Owners move funds.
 
 ## 10. Performance benchmarking methodology
 
@@ -257,6 +272,7 @@ Keep a written DR note listing what must be restored (env files from the operato
 3. Update one node at a time. Verify health, then **verify on chain** (§4.6), before the next.
 4. Rollback is one documented command that restores the previous tagged image and presets. Test it before you need it.
 5. Automatic updates are allowed only as a written policy (Law 06). The policy states the trigger (for example, a release manifest you control), the verification, and the rollback.
+6. A deployment that restarts a monitored service **MUST** set the alert hold for exactly the condition the restart trips, read it back, and refuse to proceed if either step fails. It releases the hold once the new build is verified serving. A deploy that fails midway leaves the hold to expire, so a service left down still pages. *Reference finding:* a deploy chained "set hold" and "deploy". The hold failed on an expired privilege, and the operator was paged for a planned restart. Both reference deploy scripts now fail closed.
 
 ## 13. Evidence and verification
 
@@ -268,6 +284,8 @@ Every published claim carries:
 - **Limits**: what it does not show.
 
 Producer attribution to a person or organisation needs a citable, first-hand statement or a public record. A relayed claim stays labelled "reported". Everything else is "unknown".
+
+Statements by network developers (chat, calls) are recorded verbatim, with date, time zone and source, as **historical statements**. They can prompt a check; they are not evidence of protocol behaviour, and they are never presented as endorsement. When a statement and an on-chain event agree in time, that is a correlation, not proof of cause.
 
 ## 14. Compliance levels and checklist
 
@@ -303,6 +321,8 @@ Three Oxyon-defined levels. Each includes the previous one. **These are not XYO 
 | O-05 | Public output is a projection without host identity, enforced by test | 04 | test |
 | O-06 | Visitors cause no producer or RPC load | 04, 07 | architecture + Worker/collector review |
 | O-07 | Host headroom (memory, swap, disk, thermal) recorded | 08 | collector output |
+| O-08 | Rewards read per block (recorded / estimated / unknown), fees separate, era-correct | 01, 02 | accounting output versus block files |
+| O-09 | Historical scans single-flight, bounded and resumable, and reconciled against independent block-file counts before totals are published (§9.1) | 01, 03 | reconciliation record |
 
 ### Research: Observed plus reproducible benchmarking and checkable findings
 
@@ -316,9 +336,9 @@ Three Oxyon-defined levels. Each includes the previous one. **These are not XYO 
 
 ## 15. Known limitations and future revisions
 
-- v1.0 is drawn from two hosts (one Raspberry Pi 3 B+, one Windows laptop with Docker Desktop) and CLI 5.6.1. Other hardware may behave differently.
+- v1.0 is drawn from two hosts (one Raspberry Pi 3 B+, one Windows laptop with Docker Desktop) and CLI 5.6.1 and 5.6.2. Other hardware may behave differently.
 - The daily-share method uses UTC days. Hourly resolution would allow shorter comparable windows. Planned.
-- XL1 eligibility and staking rules are evolving. §6 defers to XYO.
+- XL1 eligibility and staking rules are evolving. §6 defers to XYO; its stake observations are as of 2026-10-11, CLI 5.6.2.
 - The tie-break behaviour (§10) may change upstream. If it does, re-measure before reusing anything here.
 - Reproducibility test B-12 has not yet been performed by a third party.
 
@@ -332,6 +352,7 @@ Each revision records what changed and why, in the history below.
 | Version | Date | Change |
 |---|---|---|
 | 1.0 (draft) | 2026-10-10 | First draft |
+| 1.0 (draft, rev. 5) | 2026-10-11 | §6 stake, intent re-declaration and finalizer authorization separated. §9 reward accounting metrics and §9.1 historical scans and reconciliation. §12.6 hold-verified deployments. §13 developer statements as historical evidence. O-08/O-09. B-14 deployed. Still a draft |
 | 1.0 (draft, rev. 4) | 2026-10-10 | S-12 accepted-risk register, B-14 and the planned-maintenance practice (selective holds); S-10 deployed on one host. Still a draft |
 | 1.0 (draft, rev. 3) | 2026-10-10 | Status legend (verified / proposed / deployed / reproduced) in Appendix A; graceful-stop and sidecar-memory findings from 002D testing; O-04 partly deployed. Still a draft |
 | 1.0 (draft, rev. 2) | 2026-10-10 | Added S-10/S-11 (secret-file permissions, backups), sidecar memory, graceful-stop cause, three incident patterns, the reproducibility protocol, Appendix A gap table, Appendix C self-assessment. Still a draft |
@@ -377,7 +398,7 @@ No controlled comparison with 4000 or 5000 exists. 3000 is not claimed to be opt
 | B-07 | Verified: Windows producer containers have no log rotation | Proposed: 10 MB × 3, rendered and tested |
 | B-10 | Verified: Pi OS updates upgraded the container runtime and so restarted the producer | Proposed: runtime upgrades become an operator command; reboot mode becomes a setting; policy documented |
 | B-11 | Verified: one Windows image had no tag | **Deployed:** rollback tags for both running images, verified against the running image IDs. Runbook steps for the extras still to be written |
-| B-14 | Verified: no selective hold existed; a dashboard restart paged | Proposed: holds implemented and tested on both alerters (2.3.2), not deployed |
+| B-14 | Verified: no selective hold existed; a dashboard restart paged | **Deployed:** selective holds on both alerters (2.3.2). Dashboard deploy scripts on both hosts refuse to deploy without a read-back hold (2026-10-11) |
 | B-12 | — | Protocol published ([`REPRODUCIBILITY-TEST.md`](REPRODUCIBILITY-TEST.md)); no independent run yet |
 | S-10 | Verified: secret files on one host granted access to accounts other than the operator’s | **Deployed on that host (2026-10-10):** permissions reduced to the operator and the system, folder protected so new files inherit nothing else, exact rollback record kept; scheduled tasks and producers verified unaffected. The other host not yet assessed |
 
@@ -386,6 +407,8 @@ Observed-level gaps:
 | Gap | Finding | Remediation status |
 |---|---|---|
 | O-04 | Verified: a standing false "cannot produce" alert, raised from the node's self-report while the chain showed production | **Deployed:** chain evidence overrules a contradicted complaint (alerts cleared). Proposed: v2 classifies every case (contradicted, not landing, unverified, never seen, producer down) so a missing block is never reported as a stake problem |
+| O-08 | Verified: per-block reward accounting on both dashboards since 2.3.3 | **Deployed** on the dashboards. Proposed: the same figures in the public telemetry |
+| O-09 | Verified: the 2.3.4 history scan double-counted (found by its own reconciliation check) | **Deployed:** single-flight fix (2.3.5). Ranges already scanned reconciled on both hosts (2026-10-11). Lifetime totals pending the scan reaching block 1 |
 | §8 Graceful stop | Verified: every Pi stop waited the full timeout and ended in SIGKILL; PID 1 forwards no signals | Proposed: `--init` (stop in ~1 s). Verified that `--init` does **not** let the CLI clean up; only an entrypoint that forwards signals does (upstream issue drafted, not filed) |
 | §8 Sidecar memory | Verified: race observer OOM-killed repeatedly at 96 MiB. Cause, from a replay of its own data under the same limit: native memory held by the C allocator's per-thread arenas (live JS set ~19 MB), plus a small unpruned set | Proposed: allocator arena cap (plateau 73 → 45 MB) and set pruning; limit unchanged |
 
