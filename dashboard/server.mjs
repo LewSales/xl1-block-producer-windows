@@ -528,6 +528,23 @@ function initHistory() {
 /** The rewards section of the API: what was recorded, what is estimated or
  *  reconstructed (and on what basis), and what is unknown -- never one number
  *  pretending to be all three. */
+/** Own blocks the live counter holds twice, as established by the chain.
+ *  Before 2.3.5 two overlapping polls could count one block twice in the live
+ *  scan (Sequence: 10,683 counted where the block files hold 10,681). Once the
+ *  history walk has read the whole scanned range, the difference between what
+ *  the live scan counted there and what the chain shows is known exactly, and
+ *  it is what the all-time total subtracts. Never negative: a live count below
+ *  the chain would be blocks missed, not duplicates, and is not "corrected".
+ *  The stored counter and the trend it feeds are left as they are -- nothing
+ *  persisted is rewritten, and the trend's deltas stay continuous. */
+function selfOvercount() {
+  const h = chainHistory
+  const covered = h.attrSince !== undefined && h.cursor !== undefined && h.scannedFrom !== undefined && h.cursor < h.scannedFrom
+  if (!covered || ledger.preLedgerBlocks === undefined) return 0
+  const d = ledger.preLedgerBlocks - h.self.inScan.blocks
+  return d > 0 ? d : 0
+}
+
 function rewardsView(currentBlock = state.chain?.currentBlock, net = NETWORK) {
   const x = (atto) => exactXl1(atto)
   const view = { network: net, recipient: REWARD_ADDRESS || PRODUCER_ADDRESS || undefined }
@@ -1823,7 +1840,12 @@ function peerBoard() {
     }
   }
 
-  const rows = rank(peers, scanned)
+  // The all-time standings use the chain-verified own count (see selfOvercount);
+  // day windows cannot be corrected the same way, since which day held the
+  // duplicate is not known, and are left as counted.
+  const over = self ? selfOvercount() : 0
+  const allTime = over > 0 && peers.has(self) ? new Map([...peers, [self, Math.max(0, peers.get(self) - over)]]) : peers
+  const rows = rank(allTime, scanned)
   const mine = rows.find((r) => r.isSelf)
 
   return {
@@ -3243,7 +3265,7 @@ function derived(board = peerBoard()) {
     blocksSinceLast: (state.chain?.currentBlock !== undefined && production.lastBlock !== undefined)
       ? state.chain.currentBlock - Number(production.lastBlock)
       : undefined,
-    producedObserved: production.counted,
+    producedObserved: Math.max(0, production.counted - selfOvercount()),
     producedSince: production.scannedFrom,
     productionError: production.error,
     // Share of the chain's blocks this node signed. The denominator is blocks
@@ -3575,7 +3597,7 @@ const server = createServer(async (req, res) => {
 // Docker daemon, or a Pi. `overall` and `pollNode` in particular encode the
 // contract with xl1-collect.sh, which is where two silent failures have already
 // hidden.
-export { attributedReward, historyBlock, backfillHistory, singleFlight, publicRewards, historyDoc, restoreHistory, initHistory, chainHistory, liveAttributed, STEP_REWARD_ADDRESS, protocolBlockReward, protocolProducerReward, recordedRewards, accountBlock, ledger, ledgerDoc, restoreLedger, rewardsView, exactXl1, REWARD_ERAS, eligibilityVerdict, nodeView, blocksSinceOwn, chainEvidence, ELIGIBILITY_CHAIN_BLOCKS, CHAIN_FRESH_MS, ELIGIBILITY_WARMUP_MS, nextReleaseDelay, CLI_RETRY_MS, CLI_CHECK_MS, formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, blockEpoch, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys, networkView, concentration, shareDrift, producerChurn, observeBatch, gapPercentile, chainObs, GAP_EDGES, sumDays, pollAlerts, prunePeers, peersEvicted, PEERS_MAX, fleetView, fleetSummary, pollFleet, fleet, FLEET, publicView, pollPrice, priceView, NO_MARKET, continuity, pollSystem, HOST_PLATFORM }
+export { selfOvercount, attributedReward, historyBlock, backfillHistory, singleFlight, publicRewards, historyDoc, restoreHistory, initHistory, chainHistory, liveAttributed, STEP_REWARD_ADDRESS, protocolBlockReward, protocolProducerReward, recordedRewards, accountBlock, ledger, ledgerDoc, restoreLedger, rewardsView, exactXl1, REWARD_ERAS, eligibilityVerdict, nodeView, blocksSinceOwn, chainEvidence, ELIGIBILITY_CHAIN_BLOCKS, CHAIN_FRESH_MS, ELIGIBILITY_WARMUP_MS, nextReleaseDelay, CLI_RETRY_MS, CLI_CHECK_MS, formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, blockEpoch, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys, networkView, concentration, shareDrift, producerChurn, observeBatch, gapPercentile, chainObs, GAP_EDGES, sumDays, pollAlerts, prunePeers, peersEvicted, PEERS_MAX, fleetView, fleetSummary, pollFleet, fleet, FLEET, publicView, pollPrice, priceView, NO_MARKET, continuity, pollSystem, HOST_PLATFORM }
 
 // Only run as a server when executed directly, not when imported by a test.
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
