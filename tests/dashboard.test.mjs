@@ -2239,6 +2239,28 @@ test('lifetime blocks come from chain-read counts, not a live counter that over-
   } finally { m.peers.delete(SELF); resetLedger() }
 })
 
+test('the all-time own total drops the chain-proven duplicates in the live counter, and nothing else', async () => {
+  const viewer = await setup()
+  m.peers.set(SELF, 42) // the live counter: two more than the chain shows (the pre-2.3.5 overlap)
+  m.ledger.recordedBlocks = 20
+  m.ledger.preLedgerBlocks = 22 // the live scan counted 22 own blocks in the scanned range; the chain holds 20
+  try {
+    assert.equal(m.selfOvercount(), 0, 'no correction before the walk has read the scanned range')
+    assert.equal(m.peerBoard().self.blocks, 42)
+    await walk(viewer)
+    assert.equal(m.selfOvercount(), 2, 'the difference is exactly what the chain disproves')
+    const board = m.peerBoard()
+    assert.equal(board.self.blocks, 40, 'the all-time standing shows the chain-verified count')
+    assert.equal(m.rewardsView(1000, 'sequence').lifetime.blocks, 200, 'and agrees with lifetime: 160 pre-scan + 40 since')
+    assert.equal(m.peers.get(SELF), 42, 'the stored counter is not rewritten')
+    assert.equal(m.rewardsView(1000, 'sequence').lifetime.liveCounterBlocks, 202, 'the raw counter stays visible as such')
+    assert.equal(m.publicView(board).producer.blocks.total, 40, 'the public total agrees with the verified record')
+    m.ledger.preLedgerBlocks = 19 // a live count BELOW the chain is missed blocks, not duplicates
+    assert.equal(m.selfOvercount(), 0, 'never corrected upward')
+    assert.equal(m.peerBoard().self.blocks, 42)
+  } finally { m.peers.delete(SELF); resetLedger() }
+})
+
 test('the public rewards projection: own record only, labelled, checkable', async () => {
   const viewer = await setup()
   m.peers.set(SELF, 40); m.ledger.recordedBlocks = 20
