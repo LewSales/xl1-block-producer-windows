@@ -969,7 +969,7 @@ test('streaks count blocks since the last win, oldest-first ring', () => {
 test('the snapshot carries a build identity', () => {
   const b = m.snapshot().build
   assert.ok(b, 'every snapshot must identify the build serving it')
-  assert.equal(b.version, '2.3.5', 'read from package.json, not hardcoded')
+  assert.equal(b.version, '2.3.7', 'read from package.json, not hardcoded')
   // Unstamped in the test environment, which is exactly the fallback path an
   // argument-less `docker build` takes.
   assert.equal(b.commit, 'unknown')
@@ -2154,14 +2154,15 @@ test('historical eras are taken from each block, never today’s rate', async ()
   assert.equal(pre.recorded, xl1('25') * 79n + xl1('50') * 81n)
 })
 
-test('a partial gateway answer never advances the checkpoint', async () => {
+test('a partial gateway answer never advances the checkpoint past the missing block', async () => {
   resetHistoryState(); resetLedger()
   Object.assign(m.production, { scannedFrom: 801, cursor: 1000 }); m.ledger.since = 901; m.initHistory()
   const viewer = historyViewer(syntheticChain(1000), { short: new Set([950]) })
   await m.backfillHistory(viewer, 1000)
-  assert.equal(m.chainHistory.cursor, 1000, 'block 950 missing: the batch is retried, not skipped')
-  assert.match(m.chainHistory.error, /199 of 200 blocks/)
-  assert.equal(m.chainHistory.self.inScan.blocks, 0, 'nothing from the incomplete batch was counted')
+  // Smaller batches read 951..1000 completely; block 950 itself is missing at every size.
+  assert.equal(m.chainHistory.cursor, 950, 'the walk stops exactly above the hole and never passes it')
+  assert.match(m.chainHistory.error, /even at the smallest batch/)
+  assert.equal(m.chainHistory.self.inScan.blocks, 0, 'nothing below the hole was counted')
 })
 
 test('an interrupted walk resumes from its checkpoint with no block counted twice', async () => {
@@ -2208,6 +2209,7 @@ test('live attribution starts at the hand-over block and never overlaps the hist
 test('rewardsView: no lifetime claim until the walk reaches block 1', async () => {
   const viewer = await setup()
   m.peers.set(SELF, 40) // live counts since scannedFrom (801..1000: 40 SELF blocks)
+  m.ledger.recordedBlocks = 20 // the ledger's own blocks, 901..1000
   try {
     await m.backfillHistory(viewer, 1000)
     let v = m.rewardsView(1000, 'sequence')
@@ -2216,12 +2218,49 @@ test('rewardsView: no lifetime claim until the walk reaches block 1', async () =
     await walk(viewer)
     v = m.rewardsView(1000, 'sequence')
     assert.equal(v.history.coverage, 'complete'); assert.equal(v.history.percent, 100)
-    assert.equal(v.lifetime.blocks, 200, '160 pre-scan + 40 since scanning began')
+    assert.equal(v.lifetime.blocks, 200, '160 pre-scan + 20 in-scan + 20 in the ledger, all read from the chain')
+    assert.equal(v.lifetime.liveCounterBlocks, 200, 'the live counter agrees here')
     assert.equal(v.lifetime.firstBlock, 5)
     assert.equal(v.lifetime.basis, 'chain records from block 1')
     assert.equal(v.inScanRecorded.blocks, 20, 'in-scan rewards read from the chain')
     assert.equal(v.reconstructed, undefined, 'and they replace the reconstruction')
-  } finally { m.peers.delete(SELF) }
+  } finally { m.peers.delete(SELF); resetLedger() }
+})
+
+test('lifetime blocks come from chain-read counts, not a live counter that over-counted', async () => {
+  const viewer = await setup()
+  m.peers.set(SELF, 42) // two more than the chain shows (the pre-2.3.5 overlap)
+  m.ledger.recordedBlocks = 20
+  try {
+    await walk(viewer)
+    const v = m.rewardsView(1000, 'sequence')
+    assert.equal(v.lifetime.blocks, 200, 'chain-read: 160 + 20 + 20')
+    assert.equal(v.lifetime.liveCounterBlocks, 202, 'the live counter is shown beside it, not used')
+  } finally { m.peers.delete(SELF); resetLedger() }
+})
+
+test('the public rewards projection: own record only, labelled, checkable', async () => {
+  const viewer = await setup()
+  m.peers.set(SELF, 40); m.ledger.recordedBlocks = 20
+  try {
+    await m.backfillHistory(viewer, 1000)
+    let pub = m.publicView(m.peerBoard()).rewards
+    assert.ok(pub, 'rewards are published')
+    assert.equal(pub.lifetime, undefined, 'no lifetime while the walk is partial')
+    assert.equal(pub.history.coverage, 'partial')
+    assert.match(pub.evidence.blockFile, /^https:\/\/blocks\.(mainnet|sequence)\.xyo\.space\/block\/number\/\{n\}\.json$/)
+    assert.equal(pub.evidence.method, 'https://oxyon.io/xl1/about-data/#rewards')
+    m.chainHistory.error = 'CANARY-GATEWAY-ERROR http://10.0.0.9'
+    await walk(viewer)
+    pub = m.publicView(m.peerBoard()).rewards
+    const text = JSON.stringify(pub)
+    assert.equal(pub.lifetime.blocks, 200, 'lifetime appears once the walk reaches block 1')
+    assert.equal('lifetimeSigners' in pub, false, 'other producers\' totals are not published')
+    assert.equal('recipient' in pub, false)
+    assert.equal(text.includes('CANARY-GATEWAY-ERROR'), false, 'error text never leaves the house')
+    assert.equal(pub.recorded.since !== undefined || pub.recorded.blocks !== undefined, true, 'recorded keeps its label')
+    if (pub.nextStep) assert.equal(pub.nextStep.status, 'projection')
+  } finally { m.peers.delete(SELF); resetLedger(); m.chainHistory.error = undefined }
 })
 
 test('rewardsView reports a disagreement between history and the live count', async () => {
@@ -2296,4 +2335,34 @@ test('a 2.3.4 (v1) history file is discarded, and the walk restarts from the sav
   assert.equal(m.chainHistory.counts.get(SELF), 160)
   assert.equal(m.chainHistory.self.inScan.blocks, 20)
   assert.equal(m.restoreHistory(JSON.parse(JSON.stringify(m.historyDoc()))), true, 'its own format still restores')
+})
+
+test('a range the gateway truncates at full size is walked in smaller batches, still complete and counted once', async () => {
+  const chain = syntheticChain(1000)
+  await setup({ chain })
+  const base = historyViewer(chain)
+  // Like the real gateway: a request that spans block 950 stops at 951 and returns only the newer part,
+  // unless the batch is small (<= 50); everything else is answered in full.
+  const calls = []
+  const truncating = { calls, block: { blocksByNumber: async (to, limit) => {
+    calls.push([to, limit])
+    const out = await base.block.blocksByNumber(to, limit)
+    const lowest = to - limit + 1
+    return (lowest <= 950 && to > 950 && limit > 50) ? out.filter((e) => e[0].block > 950) : out
+  } } }
+  await walk(truncating, 80)
+  assert.equal(m.chainHistory.done, true, 'the walk gets past the truncating range instead of retrying forever')
+  assert.equal(m.chainHistory.error, undefined)
+  assert.equal(m.chainHistory.counts.get(SELF), 160, 'pre-scan count unchanged')
+  assert.equal(m.chainHistory.self.inScan.blocks, 20, 'in-scan count unchanged: nothing skipped, nothing doubled')
+  assert.ok(calls.some(([, l]) => l <= 50), 'it fell back to a smaller batch')
+})
+
+test('a batch still partial at the smallest size is retried, never skipped', async () => {
+  const chain = syntheticChain(1000)
+  await setup({ chain })
+  const viewer = historyViewer(chain, { short: new Set([995]) }) // missing at every size
+  await m.backfillHistory(viewer, 1000)
+  assert.equal(m.chainHistory.cursor, 1000, 'the checkpoint did not move past the hole')
+  assert.match(m.chainHistory.error, /even at the smallest batch/)
 })
