@@ -42,7 +42,9 @@ foreach ($f in @(
   (Join-Path $Root 'scripts\xl1-alert.ps1'),
   (Join-Path $Root 'scripts\xl1-perf-snapshot.ps1'),
   (Join-Path $Root 'scripts\deploy-dashboard.ps1'),
-  (Join-Path $Root 'tests\alert.test.ps1')
+  (Join-Path $Root 'tests\alert.test.ps1'),
+  (Join-Path $Root 'scripts\xl1-publish.ps1'),
+  (Join-Path $Root 'tests\publish.test.ps1')
 )) {
   if (-not (Test-Path $f)) { Bad "$(Split-Path -Leaf $f) -- missing"; continue }
   $errors = $null
@@ -138,6 +140,17 @@ if (-not (Test-Path $alertTest)) { Bad 'tests\alert.test.ps1 -- missing' }
 else {
   & powershell -NoProfile -ExecutionPolicy Bypass -File $alertTest
   if ($LASTEXITCODE -eq 0) { Ok 'alert tests passed' } else { Bad 'alert tests failed' }
+}
+
+# ---------------------------------------------------------- status publisher
+# A real git origin shared with a second writer: only this node's file is ever
+# staged, divergence is recovered without force, failures are kept and escalated.
+Step 'Status publisher'
+$publishTest = Join-Path $Root 'tests\publish.test.ps1'
+if (-not (Test-Path $publishTest)) { Bad 'tests\publish.test.ps1 -- missing' }
+else {
+  & powershell -NoProfile -ExecutionPolicy Bypass -File $publishTest | Out-Null
+  if ($LASTEXITCODE -eq 0) { Ok 'publisher stages only its own file and recovers from divergence' } else { Bad 'publisher tests failed (run tests\publish.test.ps1 for detail)' }
 }
 
 # ---------------------------------------------------------- dashboard behaviour
