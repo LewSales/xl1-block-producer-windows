@@ -3489,6 +3489,40 @@ function publicView(board) {
       samples: state.node.latency.samples,
     } : undefined,
 
+    // How far this host's clock can be trusted, so its timestamps can be weighed
+    // against another host's. Named fields only.
+    clock: state.node?.clock ? {
+      synced: state.node.clock.synced,
+      source: state.node.clock.source,
+      stratum: state.node.clock.stratum,
+      offsetMs: state.node.clock.offsetMs,
+      offsetAgainst: state.node.clock.offsetAgainst,
+      rootDispersionMs: state.node.clock.rootDispersionMs,
+      pollIntervalSeconds: state.node.clock.pollIntervalSeconds,
+      lastSyncAt: state.node.clock.lastSyncAt,
+      checkedAt: state.node.clock.checkedAt,
+    } : undefined,
+
+    // Every producer on this host, not only the one this page is about: what each
+    // attempted in the last hour, from its own log. Wins come from the chain, not
+    // from here. Named fields only -- never the container name or image.
+    localProducers: Array.isArray(state.node?.localProducers) ? state.node.localProducers.map((p) => ({
+      id: p.id,
+      network: p.network,
+      rewardAddress: p.rewardAddress,
+      running: p.running,
+      restartCount: p.restartCount,
+      startedAt: p.startedAt,
+      windowSeconds: p.windowSeconds,
+      builds: p.builds,
+      retries: p.retries,
+      validationFailures: p.validationFailures,
+      rejected: p.rejected,
+      timePayloadP50Ms: p.timePayloadP50Ms,
+      timePayloadP95Ms: p.timePayloadP95Ms,
+      lastBuildAt: p.lastBuildAt,
+    })) : undefined,
+
     // Daily production and earnings, from the chain scan. The same rows the
     // Trends card draws.
     trend: { daily: trendDaily(), retainDays: TREND_RETAIN_DAYS },

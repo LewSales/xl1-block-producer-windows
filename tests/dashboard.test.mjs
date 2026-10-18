@@ -1635,6 +1635,34 @@ test('nothing that identifies the machine survives the projection', () => {
   }
 })
 
+test('clock and local producers are published by named field only', () => {
+  m.state.node = {
+    ok: true,
+    clock: { synced: true, source: 'time.windows.com', offsetMs: 35.2, stratum: 5, rootDispersionMs: 305,
+      pollIntervalSeconds: 32768, lastSyncAt: '2026-10-18T15:27:48Z', checkedAt: '2026-10-18T19:00:00Z', CANARY: 'CANARY-CLOCK' },
+    localProducers: [{
+      id: 'main-653e', network: 'mainnet', rewardAddress: 'a9304753eade52dd22b1a6fc519b571a4dc2653e',
+      running: true, restartCount: 0, startedAt: '2026-10-16T21:26:37Z', windowSeconds: 3600,
+      builds: 378, retries: 11, validationFailures: 11, rejected: 2, timePayloadP50Ms: 371, timePayloadP95Ms: 563,
+      lastBuildAt: '2026-10-18T19:00:00Z', name: 'CANARY-CONTAINER', image: 'CANARY-IMAGE', mnemonic: 'CANARY-PHRASE',
+    }],
+  }
+  const pub = m.publicView(m.peerBoard())
+  assert.equal(pub.clock.offsetMs, 35.2)
+  assert.equal(pub.clock.synced, true)
+  assert.equal(pub.localProducers.length, 1)
+  assert.equal(pub.localProducers[0].id, 'main-653e')
+  assert.equal(pub.localProducers[0].builds, 378)
+  const text = JSON.stringify(pub)
+  for (const canary of ['CANARY-CLOCK', 'CANARY-CONTAINER', 'CANARY-IMAGE', 'CANARY-PHRASE']) {
+    assert.equal(text.includes(canary), false, `${canary} reached the public payload`)
+  }
+  m.state.node = { ok: true }
+  const bare = m.publicView(m.peerBoard())
+  assert.equal(bare.clock, undefined, 'no clock reading means no clock field, not a zero offset')
+  assert.equal(bare.localProducers, undefined)
+})
+
 test('the status is a word, never the sentences behind it', () => {
   // Problem strings are assembled from error messages, and an error message is
   // exactly where a path or a hostname arrives without anyone deciding it should.

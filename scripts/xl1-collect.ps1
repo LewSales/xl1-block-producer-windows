@@ -51,12 +51,13 @@ function Invoke-Docker {
 # -Stamped keeps docker's timestamp prefix on each line; without it the
 # message alone is returned, as `docker logs` without --timestamps would.
 function Get-LogSince {
-  param([string]$Since, [int]$Tail = 5000, [switch]$Stamped)
+  param([string]$Since, [int]$Tail = 5000, [switch]$Stamped, [string]$Name = '')
+  $target = if ($Name) { $Name } else { $Container }
   $cut = if ($Since -match '^(\d+)([smh])$') {
     $span = @{ s = 'FromSeconds'; m = 'FromMinutes'; h = 'FromHours' }[$Matches[2]]
     (Get-Date).ToUniversalTime().Subtract([timespan]::$span([double]$Matches[1])).ToString('yyyy-MM-ddTHH:mm:ss')
   } else { $Since.Substring(0, [Math]::Min(19, $Since.Length)) }
-  Invoke-Docker logs --timestamps --tail $Tail $Container | ForEach-Object { "$_" } | Where-Object {
+  Invoke-Docker logs --timestamps --tail $Tail $target | ForEach-Object { "$_" } | Where-Object {
     $_ -match '^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\S*Z ' -and [string]::CompareOrdinal($Matches[1], $cut) -ge 0
   } | ForEach-Object { if ($Stamped) { $_ } else { $_ -replace '^\S+Z ', '' } }
 }
@@ -542,6 +543,104 @@ if (Test-Path $osCache) {
     $os.updatesAgeHours = [math]::Round((Get-CacheAge $osCache) / 3600, 1)
     $doc.os = $os
   }
+}
+
+# ---------------------------------------------------------------------- clock
+#
+# Whether this machine's timestamps can be compared with another host's. Race
+# arrival times are only as good as the clock that stamped them, and Windows
+# Time polls rarely -- 32768 s (about nine hours) measured on this host -- so the
+# last sync is reported beside a measured offset rather than "synced" assumed.
+# One NTP sample is a network round trip, so this is cached for ten minutes.
+$clockCache = Join-Path $StateDir '.clock'
+if ((Get-CacheAge $clockCache) -gt 600) {
+  $prevPref = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+  try {
+    $st = (& w32tm /query /status 2>&1 | Out-String)
+    $clk = [ordered]@{ checkedAt = $collectedAt }
+    if ($st -match 'Source:\s*(\S+)') { $clk.source = ($Matches[1] -replace ',0x\w+$', '') }
+    if ($st -match 'Stratum:\s*(\d+)') { $clk.stratum = [int]$Matches[1] }
+    if ($st -match 'Root Dispersion:\s*([\d.]+)s') { $clk.rootDispersionMs = [math]::Round([double]$Matches[1] * 1000) }
+    if ($st -match 'Poll Interval:\s*\d+\s*\((\d+)s\)') { $clk.pollIntervalSeconds = [int]$Matches[1] }
+    if ($st -match 'Last Successful Sync Time:\s*(.+)') {
+      try { $clk.lastSyncAt = ([datetime]::Parse($Matches[1].Trim())).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') } catch { }
+    }
+    # A free-running clock has nothing to be synced to; say so instead of measuring.
+    $hasSource = $clk.source -and $clk.source -notmatch 'Local|Free-running|CMOS'
+    $clk.synced = [bool]($hasSource -and $clk.lastSyncAt)
+    $peer = if ($hasSource) { $clk.source } else { 'time.windows.com' }
+    $sc = (& w32tm /stripchart /computer:$peer /samples:1 /dataonly 2>&1 | Out-String)
+    if ($sc -match ',\s*([+-]\d+\.\d+)s') { $clk.offsetMs = [math]::Round([double]$Matches[1] * 1000, 1); $clk.offsetAgainst = $peer }
+    Set-Content -Path $clockCache -Value ($clk | ConvertTo-Json -Compress) -NoNewline
+  } catch { } finally { $ErrorActionPreference = $prevPref }
+}
+if (Test-Path $clockCache) { try { $doc.clock = Get-Content $clockCache -Raw | ConvertFrom-Json } catch { } }
+
+# ------------------------------------------------------- every local producer
+#
+# This host runs more than one producer, and everything above describes one of
+# them. A producer nobody has a panel for is one nobody is watching -- that is
+# how a Mainnet key ran for days building candidates and winning none. Each gets
+# the same few counters from its own log, every five minutes.
+#
+# Wins are NOT counted here, for the same reason as in the race section: the
+# chain decides those, and the oxyon.io race view reports them. Only the network
+# and the reward address are read from each container's environment, and they
+# are picked out by the template itself, so a recovery phrase in the same
+# environment never leaves Docker.
+$fleetCache = Join-Path $StateDir '.local-producers'
+if ((Get-CacheAge $fleetCache) -gt 300) {
+  $rows = @()
+  $names = @(Invoke-Docker ps -a --filter 'name=preset' --format '{{.Names}}' | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+  # Backtick strings, not double quotes: PowerShell 5.1 strips embedded double
+  # quotes when it hands an argument to a native program, and the template then
+  # matches nothing.
+  $envTpl = '{{range .Config.Env}}{{if or (eq (index (split . `=`) 0) `XL1_NETWORK`) (eq (index (split . `=`) 0) `XL1_REWARD_ADDRESS`)}}{{println .}}{{end}}{{end}}'
+  foreach ($n in $names) {
+    $i = Invoke-Docker inspect $n --format '{{.State.Status}}|{{.State.Running}}|{{.State.StartedAt}}|{{.RestartCount}}'
+    if ($LASTEXITCODE -ne 0 -or -not $i) { continue }
+    $p = "$i".Trim() -split '\|'
+    $envLines = @(Invoke-Docker inspect $n --format $envTpl | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    $net = "$($envLines | Where-Object { $_ -like 'XL1_NETWORK=*' } | Select-Object -First 1)" -replace '^XL1_NETWORK=', ''
+    $reward = "$($envLines | Where-Object { $_ -like 'XL1_REWARD_ADDRESS=*' } | Select-Object -First 1)" -replace '^XL1_REWARD_ADDRESS=(0x)?', ''
+    $raw = @(Get-LogSince '1h' -Tail 8000 -Name $n -Stamped)
+    $msg = @($raw | ForEach-Object { $_ -replace '^\S+Z ', '' })
+    $row = [ordered]@{
+      # main-653e, seq-23b3, node: the container name without its compose wrapping.
+      id                 = ($n -replace '^xl1-', '' -replace '-preset-\d+$', '')
+      network            = $(if ($net) { $net } else { $null })
+      rewardAddress      = $(if ($reward -match '^[0-9a-fA-F]{40}$') { $reward.ToLower() } else { $null })
+      state              = $p[0]
+      running            = ($p[1] -eq 'true')
+      startedAt          = $p[2]
+      restartCount       = [int]$p[3]
+      windowSeconds      = 3600
+      builds             = @($msg | Where-Object { $_ -match 'Building block \d+$' }).Count
+      retries            = @($msg | Where-Object { $_ -match 'Building block \d+ \(retry' }).Count
+      validationFailures = @($msg | Where-Object { $_ -like '*Block validation failed*' }).Count
+      rejected           = @($msg | Where-Object { $_ -like '*No candidate block can be appended*' }).Count
+    }
+    $tp = @($msg | ForEach-Object { if ($_ -match 'Generated time payload in (\d+)ms') { [int]$Matches[1] } } | Sort-Object)
+    if ($tp.Count) {
+      $row.timePayloadP50Ms = $tp[[int][Math]::Floor($tp.Count * 0.5)]
+      $row.timePayloadP95Ms = $tp[[Math]::Min($tp.Count - 1, [int][Math]::Floor($tp.Count * 0.95))]
+    }
+    $lb = $raw | Where-Object { $_ -match 'Building block \d+' } | Select-Object -Last 1
+    if ($lb -and $lb -match '^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})') { $row.lastBuildAt = "$($Matches[1])Z" }
+    $rows += ,$row
+  }
+  # Only cache an answer docker actually gave: an empty list from a failed `ps`
+  # would read as "this host runs no producers".
+  if ($names.Count) { Set-Content -Path $fleetCache -Value (ConvertTo-Json -InputObject @($rows) -Depth 4 -Compress) -NoNewline }
+}
+if (Test-Path $fleetCache) {
+  try {
+    # Rebuilt as plain ordered maps: an array read back by ConvertFrom-Json and
+    # written again under PowerShell 5.1 serialises as {"value":[...],"Count":n}.
+    $doc.localProducers = [object[]]@(Get-Content $fleetCache -Raw | ConvertFrom-Json | ForEach-Object { $_ } | ForEach-Object {
+      $h = [ordered]@{}; foreach ($pr in $_.PSObject.Properties) { $h[$pr.Name] = $pr.Value }; $h
+    })
+  } catch { }
 }
 
 $doc.host = Get-HostMetrics
