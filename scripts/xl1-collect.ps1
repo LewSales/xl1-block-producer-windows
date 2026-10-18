@@ -74,7 +74,9 @@ New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
 # document unparseable to JSON.parse -- the dashboard reported exactly that, by
 # name, rather than going quiet, which is the only reason this took one attempt.
 function Write-Json($Object, [string]$Path) {
-  $json = $Object | ConvertTo-Json -Depth 6
+  # Compact: only the dashboard reads this file, and the per-height rows made the
+  # indented form ten times the size of the data in it.
+  $json = $Object | ConvertTo-Json -Depth 7 -Compress
   # Validate before publishing so the dashboard never reads a half-written file.
   try { $null = $json | ConvertFrom-Json }
   catch { Write-Error 'produced invalid JSON; kept previous snapshot'; exit 1 }
@@ -627,6 +629,36 @@ if ((Get-CacheAge $fleetCache) -gt 300) {
     }
     $lb = $raw | Where-Object { $_ -match 'Building block \d+' } | Select-Object -Last 1
     if ($lb -and $lb -match '^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})') { $row.lastBuildAt = "$($Matches[1])Z" }
+
+    # One row per height this producer attempted, newest last: when it started
+    # building (this host's clock), how many retries, how many validation
+    # failures and rejections, and how long the time payload before it took.
+    # oxyon.io joins these to the chain and the race observer by (network,
+    # height, producer) to say why a height was lost. Bounded to the last 360.
+    $byN = [ordered]@{}; $cur = $null; $tpLast = $null
+    foreach ($line in $raw) {
+      if ($line -notmatch '^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?)Z (.*)$') { continue }
+      $stamp = $Matches[1]; $text = $Matches[2]
+      if ($text -match 'Generated time payload in (\d+)ms') { $tpLast = [int]$Matches[1]; continue }
+      if ($text -match 'Building block (\d+)( \(retry (\d+)\))?$') {
+        $n = $Matches[1]
+        if (-not $byN.Contains($n)) {
+          $at = [DateTimeOffset]::Parse("${stamp}Z").ToUnixTimeMilliseconds()
+          $byN[$n] = @([long]$n, [long]$at, 0, 0, 0, $tpLast)
+        }
+        if ($Matches[3]) { $byN[$n][2] = [Math]::Max([int]$byN[$n][2], [int]$Matches[3]) }
+        $cur = $n; $tpLast = $null; continue
+      }
+      if ($cur -and $text -like '*Block validation failed*') { $byN[$cur][3] = [int]$byN[$cur][3] + 1; continue }
+      if ($cur -and $text -like '*No candidate block can be appended*') { $byN[$cur][4] = [int]$byN[$cur][4] + 1 }
+    }
+    $hr = @($byN.Values)
+    if ($hr.Count) {
+      $row.heights = [ordered]@{
+        columns = @('n', 'buildAt', 'retries', 'validationFailures', 'rejected', 'timePayloadMs')
+        rows    = [object[]]@($hr | Select-Object -Last 360 | ForEach-Object { ,([object[]]$_) })
+      }
+    }
     $rows += ,$row
   }
   # Only cache an answer docker actually gave: an empty list from a failed `ps`

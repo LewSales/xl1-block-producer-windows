@@ -3521,6 +3521,13 @@ function publicView(board) {
       timePayloadP50Ms: p.timePayloadP50Ms,
       timePayloadP95Ms: p.timePayloadP95Ms,
       lastBuildAt: p.lastBuildAt,
+      // Per-height build rows, joined to the chain and the race by oxyon.io.
+      // Only rows of plain numbers (or null) under the agreed columns.
+      heights: Array.isArray(p.heights?.rows) ? {
+        columns: ['n', 'buildAt', 'retries', 'validationFailures', 'rejected', 'timePayloadMs'],
+        rows: p.heights.rows.slice(-360).filter(Array.isArray)
+          .map((r) => r.slice(0, 6).map((v) => (v === null || Number.isFinite(Number(v)) ? (v === null ? null : Number(v)) : null))),
+      } : undefined,
     })) : undefined,
 
     // Daily production and earnings, from the chain scan. The same rows the

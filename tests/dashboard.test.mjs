@@ -1645,6 +1645,7 @@ test('clock and local producers are published by named field only', () => {
       running: true, restartCount: 0, startedAt: '2026-10-16T21:26:37Z', windowSeconds: 3600,
       builds: 378, retries: 11, validationFailures: 11, rejected: 2, timePayloadP50Ms: 371, timePayloadP95Ms: 563,
       lastBuildAt: '2026-10-18T19:00:00Z', name: 'CANARY-CONTAINER', image: 'CANARY-IMAGE', mnemonic: 'CANARY-PHRASE',
+      heights: { columns: ['ignored'], rows: [[1827870, 1792353777865, 0, 1, 1, 25998, 'CANARY-EXTRA'], ['CANARY-ROW', 2], 'not-a-row'] },
     }],
   }
   const pub = m.publicView(m.peerBoard())
@@ -1653,6 +1654,11 @@ test('clock and local producers are published by named field only', () => {
   assert.equal(pub.localProducers.length, 1)
   assert.equal(pub.localProducers[0].id, 'main-653e')
   assert.equal(pub.localProducers[0].builds, 378)
+  assert.deepEqual(pub.localProducers[0].heights.columns, ['n', 'buildAt', 'retries', 'validationFailures', 'rejected', 'timePayloadMs'],
+    'the columns are the agreed ones, never whatever the collector sent')
+  assert.deepEqual(pub.localProducers[0].heights.rows[0], [1827870, 1792353777865, 0, 1, 1, 25998], 'six numbers, extras dropped')
+  assert.deepEqual(pub.localProducers[0].heights.rows[1], [null, 2], 'a non-number becomes null, never text')
+  assert.equal(pub.localProducers[0].heights.rows.length, 2, 'a value that is not a row is dropped')
   const text = JSON.stringify(pub)
   for (const canary of ['CANARY-CLOCK', 'CANARY-CONTAINER', 'CANARY-IMAGE', 'CANARY-PHRASE']) {
     assert.equal(text.includes(canary), false, `${canary} reached the public payload`)
