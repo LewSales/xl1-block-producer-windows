@@ -3,6 +3,11 @@
 
     23b3 on sequence   project xl1-seq-23b3   health 127.0.0.1:9100   config\seq-23b3-producer.env
     cc91 on mainnet    project xl1-main-cc91  health 127.0.0.1:9101   config\main-cc91-producer.env
+    653e on mainnet    project xl1-main-653e  health 127.0.0.1:9102   config\main-653e-producer.env
+
+  653e (a930…653e, added 2026-10-16) is a third, separate mainnet key with its
+  own stake -- the fleet's third mainnet producer beside the Pi and cc91. It
+  runs on mainnet only.
 
   Each key is on two networks at once: 23b3 on mainnet (the Pi) and here on
   sequence, and cc91 on sequence (the main node) and here on mainnet. The
@@ -30,7 +35,7 @@
 param(
   [ValidateSet('up', 'down', 'status')][string]$Action = 'status',
   [string]$Image = 'xl1:5.6.2',
-  [ValidateSet('xl1-seq-23b3', 'xl1-main-cc91')][string]$Only
+  [ValidateSet('xl1-seq-23b3', 'xl1-main-cc91', 'xl1-main-653e')][string]$Only
 )
 
 $ErrorActionPreference = 'Stop'
@@ -42,13 +47,18 @@ $PresetRest = Join-Path $Root 'presets\roles\producer-rest.json'
 
 $Extras = @(
   @{ Project = 'xl1-seq-23b3'; Env = 'seq-23b3-producer.env'; Health = 9100 },
-  @{ Project = 'xl1-main-cc91'; Env = 'main-cc91-producer.env'; Health = 9101 }
+  @{ Project = 'xl1-main-cc91'; Env = 'main-cc91-producer.env'; Health = 9101 },
+  @{ Project = 'xl1-main-653e'; Env = 'main-653e-producer.env'; Health = 9102 }
 )
 
 foreach ($x in $Extras) {
   if ($Only -and $x.Project -ne $Only) { continue }
   $envPath = Join-Path $Root "config\$($x.Env)"
   if ($Action -ne 'status' -and -not (Test-Path $envPath)) { throw "missing $envPath" }
+  # A placeholder phrase would start a producer for some other, unstaked key.
+  if ($Action -eq 'up' -and (Select-String -Path $envPath -Pattern 'PASTE_RECOVERY_PHRASE_HERE' -Quiet)) {
+    throw "$($x.Env) still has the placeholder recovery phrase -- fill in XL1_MNEMONIC first"
+  }
 
   # Relative to the first compose file's directory, as in xl1ctl.ps1.
   $env:XL1_IMAGE = $Image

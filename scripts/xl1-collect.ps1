@@ -40,6 +40,27 @@ function Invoke-Docker {
   try { & docker @args 2>&1 } finally { $ErrorActionPreference = $prev }
 }
 
+# Log lines stamped at or after $Since -- a UTC RFC 3339 time, or a duration
+# such as '20m' -- read BACKWARD with --tail and filtered here, never with
+# `docker logs --since`. --since reads the json-file forward from its first
+# entry and stops dead at the first damaged one: an entry broken on 2026-10-13
+# at 12:00Z (the laptop sleeping or crashing mid-write) made every --since read
+# return nothing for days, buildsThisRun stayed 0, and the alerter paged "never
+# built a block" on nodes that were landing blocks. --tail reads from the end,
+# so it sees the recent log whatever is wrong further up.
+# -Stamped keeps docker's timestamp prefix on each line; without it the
+# message alone is returned, as `docker logs` without --timestamps would.
+function Get-LogSince {
+  param([string]$Since, [int]$Tail = 5000, [switch]$Stamped)
+  $cut = if ($Since -match '^(\d+)([smh])$') {
+    $span = @{ s = 'FromSeconds'; m = 'FromMinutes'; h = 'FromHours' }[$Matches[2]]
+    (Get-Date).ToUniversalTime().Subtract([timespan]::$span([double]$Matches[1])).ToString('yyyy-MM-ddTHH:mm:ss')
+  } else { $Since.Substring(0, [Math]::Min(19, $Since.Length)) }
+  Invoke-Docker logs --timestamps --tail $Tail $Container | ForEach-Object { "$_" } | Where-Object {
+    $_ -match '^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\S*Z ' -and [string]::CompareOrdinal($Matches[1], $cut) -ge 0
+  } | ForEach-Object { if ($Stamped) { $_ } else { $_ -replace '^\S+Z ', '' } }
+}
+
 # $PSScriptRoot is not populated while param() defaults are evaluated in
 # PowerShell 5.1 -- it is set when the body starts. A default referring to it
 # silently becomes an empty path.
@@ -185,7 +206,7 @@ $sinceArg = if (Test-Path $since) { (Get-Content $since -Raw).Trim() } else { $n
 # purely to stamp the recent-log panel -- that used to cost a second CLI
 # process and Engine API round trip every single cycle, forever.
 $rawNewLog = @(
-  $(if ($sinceArg) { Invoke-Docker logs --timestamps --since $sinceArg $Container } else { Invoke-Docker logs --timestamps --tail 2000 $Container }) |
+  $(if ($sinceArg) { Get-LogSince $sinceArg -Stamped } else { Invoke-Docker logs --timestamps --tail 2000 $Container }) |
     ForEach-Object { "$_" }
 )
 Set-Content -Path $since -Value $collectedAt -NoNewline
@@ -221,7 +242,9 @@ if (Test-Path $runFile) {
   if ($parts.Count -ge 2) { $prevStarted = $parts[0]; [int]::TryParse($parts[1], [ref]$builds) | Out-Null }
 }
 if ($prevStarted -ne $f[2]) {
-  $builds = @(Invoke-Docker logs --since $f[2] $Container | Select-String -Pattern 'building block').Count
+  # Once per container start, so a deeper read is affordable here; the answer
+  # that matters is whether it is zero.
+  $builds = @(Get-LogSince $f[2] -Tail 20000 | Select-String -Pattern 'building block').Count
 }
 else {
   $builds += @($newLog | Select-String -Pattern 'building block').Count
@@ -358,7 +381,7 @@ if (Test-Path $lastPub) {
 # ----------------------------------------------------------------- eligibility
 $eligCache = Join-Path $StateDir '.eligibility'
 if ((Get-CacheAge $eligCache) -gt 120) {
-  $eligLog = (Invoke-Docker logs --since $EligibilityWindow $Container | Out-String).ToLower()
+  $eligLog = (Get-LogSince $EligibilityWindow | Out-String).ToLower()
   $key = ''; $reason = ''
   if ($eligLog) {
     # needle -> key, prose. The key is stable; the prose may be reworded.

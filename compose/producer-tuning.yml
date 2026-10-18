@@ -44,3 +44,14 @@ services:
     volumes:
       - ${XL1_PRODUCER_PRESET:?XL1_PRODUCER_PRESET must be set — xl1ctl.ps1 sets it}:/opt/xl1/presets/roles/producer.json:ro
       - ${XL1_PRODUCER_PRESET_REST:?XL1_PRODUCER_PRESET_REST must be set — xl1ctl.ps1 sets it}:/opt/xl1/presets/roles/producer-rest.json:ro
+    # Bounded, rotated logs. Unbounded, one json-file grew for days, and an
+    # entry damaged at 2026-10-13 12:00Z (most likely the laptop sleeping or
+    # crashing mid-write) made every forward read -- `docker logs --since` --
+    # stop there. The collector then counted zero builds and paged "never built
+    # a block" for two days on nodes that were landing blocks. Rotation keeps a
+    # damaged entry from blinding readers for longer than one file.
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
