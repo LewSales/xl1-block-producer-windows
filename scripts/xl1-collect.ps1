@@ -58,15 +58,22 @@ function Invoke-Docker {
 # its build on about 2% of height rows (6-7 of 360 on 2026-10-22) and the rest
 # had none. Docker stamps each line with nanoseconds but drops trailing zeros,
 # so the fraction is padded before comparing; equal stamps keep arrival order.
+# [Array]::Sort on precomputed keys, not Sort-Object: 8000 lines took ~1.3 s
+# the pipeline way, for each of four containers in a 30 s cycle.
 function Sort-LogStamped {
   param([string[]]$Lines)
-  $i = 0
-  @($Lines | ForEach-Object {
-    $key = if ($_ -match '^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z ') {
+  if (-not $Lines) { return }
+  $keys = New-Object string[] $Lines.Count
+  for ($i = 0; $i -lt $Lines.Count; $i++) {
+    $stamp = if ($Lines[$i] -match '^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z ') {
       $Matches[1] + '.' + "$($Matches[2])".PadRight(9, '0').Substring(0, 9)
     } else { '' }
-    [pscustomobject]@{ Key = $key; I = $i++; Line = $_ }
-  } | Sort-Object Key, I | ForEach-Object { $_.Line })
+    # The arrival index makes every key unique, so the unstable sort is deterministic.
+    $keys[$i] = $stamp + '|' + $i.ToString('D7')
+  }
+  $sorted = [string[]]$Lines.Clone()
+  [Array]::Sort($keys, $sorted, [StringComparer]::Ordinal)
+  $sorted
 }
 
 function Get-LogSince {
@@ -229,7 +236,7 @@ $sinceArg = if (Test-Path $since) { (Get-Content $since -Raw).Trim() } else { $n
 # purely to stamp the recent-log panel -- that used to cost a second CLI
 # process and Engine API round trip every single cycle, forever.
 $rawNewLog = @(
-  $(if ($sinceArg) { Get-LogSince $sinceArg -Stamped } else { Invoke-Docker logs --timestamps --tail 2000 $Container }) |
+  $(if ($sinceArg) { Get-LogSince $sinceArg -Stamped } else { Sort-LogStamped @(Invoke-Docker logs --timestamps --tail 2000 $Container | ForEach-Object { "$_" }) }) |
     ForEach-Object { "$_" }
 )
 Set-Content -Path $since -Value $collectedAt -NoNewline

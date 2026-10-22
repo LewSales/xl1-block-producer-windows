@@ -53,6 +53,13 @@ Check 'every build paired with its payload' "$($pairs['1862877']),$($pairs['1862
 $tie = @(Sort-LogStamped @('2026-10-22T21:00:00.5Z b', '2026-10-22T21:00:00.500Z a', '2026-10-22T21:00:00Z c'))
 Check 'equal stamps keep arrival order; whole seconds sort first' ($tie -join '|') '2026-10-22T21:00:00Z c|2026-10-22T21:00:00.5Z b|2026-10-22T21:00:00.500Z a'
 Check 'empty input' (@(Sort-LogStamped @()).Count) 0
+Check 'null input' (@(Sort-LogStamped $null).Count) 0
+
+# The collector sorts up to 8000 lines per container every 30 s.
+$many = @(for ($k = 0; $k -lt 8000; $k++) { '2026-10-22T21:{0:D2}:{1:D2}.{2}Z line {3}' -f [int][Math]::Floor($k / 600), [int][Math]::Floor(($k % 600) / 10), (($k * 7919) % 1000), $k })
+$ms = (Measure-Command { $big = @(Sort-LogStamped $many) }).TotalMilliseconds
+Check '8000 lines kept' $big.Count 8000
+if ($ms -lt 500) { Ok "8000 lines sorted in $([int]$ms) ms" } else { Fail "8000 lines sorted in $([int]$ms) ms (budget 500)" }
 
 if ($script:Failed) { Write-Host "  $script:Failed failed" -ForegroundColor Red; exit 1 }
 Write-Host '  all passed' -ForegroundColor Green
