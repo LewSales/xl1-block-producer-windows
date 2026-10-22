@@ -377,6 +377,14 @@ else {
   if ((Field $json 'system.swap.usedPercent' 0) -gt 60) {
     Add-Condition 'swapping' 'default' 'Heavy swap use — this machine is short of RAM'
   }
+  # The wait on Ethereum before every candidate. On 2026-10-22 the default
+  # endpoint hung 15-140 s at a time for an hour and a half, candidates landed
+  # late, and every check above stayed quiet. The dashboard decides when
+  # (timePayload.alerts) and words it, so both hosts page alike.
+  $slowPayload = @(Field $json 'timePayload.alerts' @() | Where-Object { $_ })
+  if ($slowPayload.Count -gt 0) {
+    Add-Condition 'slow-payload' 'high' ('Slow time payloads — ' + ($slowPayload -join '; '))
+  }
 
   # The Pi's undervoltage, hard-throttle and thermal rules have no analogue
   # here, and neither do its apt ones: both read fields the Windows collector
