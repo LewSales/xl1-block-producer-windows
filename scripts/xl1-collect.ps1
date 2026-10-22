@@ -50,6 +50,25 @@ function Invoke-Docker {
 # so it sees the recent log whatever is wrong further up.
 # -Stamped keeps docker's timestamp prefix on each line; without it the
 # message alone is returned, as `docker logs` without --timestamps would.
+# Docker's stamped lines back in the order they were written. `docker logs`
+# sends the container's stdout and stderr on separate streams, and PowerShell
+# 5.1's 2>&1 does not keep them interleaved: stderr arrives in batches after
+# the stdout around it. xl1-cli writes "Generated time payload" to stderr and
+# "Building block" to stdout, so in arrival order the payload time preceded
+# its build on about 2% of height rows (6-7 of 360 on 2026-10-22) and the rest
+# had none. Docker stamps each line with nanoseconds but drops trailing zeros,
+# so the fraction is padded before comparing; equal stamps keep arrival order.
+function Sort-LogStamped {
+  param([string[]]$Lines)
+  $i = 0
+  @($Lines | ForEach-Object {
+    $key = if ($_ -match '^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z ') {
+      $Matches[1] + '.' + "$($Matches[2])".PadRight(9, '0').Substring(0, 9)
+    } else { '' }
+    [pscustomobject]@{ Key = $key; I = $i++; Line = $_ }
+  } | Sort-Object Key, I | ForEach-Object { $_.Line })
+}
+
 function Get-LogSince {
   param([string]$Since, [int]$Tail = 5000, [switch]$Stamped, [string]$Name = '')
   $target = if ($Name) { $Name } else { $Container }
@@ -57,9 +76,10 @@ function Get-LogSince {
     $span = @{ s = 'FromSeconds'; m = 'FromMinutes'; h = 'FromHours' }[$Matches[2]]
     (Get-Date).ToUniversalTime().Subtract([timespan]::$span([double]$Matches[1])).ToString('yyyy-MM-ddTHH:mm:ss')
   } else { $Since.Substring(0, [Math]::Min(19, $Since.Length)) }
-  Invoke-Docker logs --timestamps --tail $Tail $target | ForEach-Object { "$_" } | Where-Object {
+  $lines = @(Invoke-Docker logs --timestamps --tail $Tail $target | ForEach-Object { "$_" } | Where-Object {
     $_ -match '^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\S*Z ' -and [string]::CompareOrdinal($Matches[1], $cut) -ge 0
-  } | ForEach-Object { if ($Stamped) { $_ } else { $_ -replace '^\S+Z ', '' } }
+  })
+  Sort-LogStamped $lines | ForEach-Object { if ($Stamped) { $_ } else { $_ -replace '^\S+Z ', '' } }
 }
 
 # $PSScriptRoot is not populated while param() defaults are evaluated in
