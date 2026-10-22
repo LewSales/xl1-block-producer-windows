@@ -171,6 +171,32 @@ XL1_ALERT_NAME=testnode
   Has   'a launch that never produced is caught'  'never-produced' (Mk2 1800 0)
   Hasnt 'a producing launch is not accused'       'never-produced' (Mk2 1800 4)
 
+  # Slow time payloads page with the dashboard's own wording; an empty list is quiet.
+  function Mk3 {
+    param([string]$Alerts)
+    @"
+{"status":"ok","health":{"ok":true},"chain":{"ok":true},
+ "node":{"ok":true,"stale":false,"container":{"running":true},
+         "eligibility":{"blocked":false},"runSeconds":5000,"buildsThisRun":40},
+ "timePayload":{"producers":[],"alerts":[$Alerts]},
+ "release":{"ok":true},"derived":{"blocksSinceLast":0},
+ "system":{"ok":true,"swap":{"usedPercent":0}}}
+"@ | Set-Content -Path (Join-Path $Work 'status9.json') -Encoding UTF8
+    $env9 = Join-Path $Work 'alert9.env'
+    @"
+XL1_ALERT_URL=http://127.0.0.1:$Port/status9.json
+XL1_ALERT_STATE=$Work\.alert-state9
+XL1_ALERT_NAME=testnode
+"@ | Set-Content -Path $env9 -Encoding UTF8
+    $old = $env:XL1_ALERT_ENV
+    $env:XL1_ALERT_ENV = $env9
+    try { (& $Alert -Status *>&1 | Out-String) } finally { $env:XL1_ALERT_ENV = $old }
+  }
+  $slowOut = Mk3 '"main-653e: 12 of 40 time payloads over 3 s in the last hour (Ethereum RPC image default)"'
+  Has   'slow time payloads page'             'slow-payload' $slowOut
+  Has   'and say which producer and endpoint' 'main-653e: 12 of 40' $slowOut
+  Hasnt 'no slow payloads, no page'           'slow-payload' (Mk3 '')
+
   # ---------------------------------------------- maintenance holds (2.3.2)
   # Own state directory and fixture copy, so the sequence below is not perturbed.
   $hd = Join-Path $Work 'hold'; New-Item -ItemType Directory -Path $hd -Force | Out-Null

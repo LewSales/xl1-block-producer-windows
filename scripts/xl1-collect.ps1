@@ -624,7 +624,7 @@ if ((Get-CacheAge $fleetCache) -gt 300) {
   # Backtick strings, not double quotes: PowerShell 5.1 strips embedded double
   # quotes when it hands an argument to a native program, and the template then
   # matches nothing.
-  $envTpl = '{{range .Config.Env}}{{if or (eq (index (split . `=`) 0) `XL1_NETWORK`) (eq (index (split . `=`) 0) `XL1_REWARD_ADDRESS`)}}{{println .}}{{end}}{{end}}'
+  $envTpl = '{{range .Config.Env}}{{if or (eq (index (split . `=`) 0) `XL1_NETWORK`) (eq (index (split . `=`) 0) `XL1_REWARD_ADDRESS`) (eq (index (split . `=`) 0) `XL1_EVM_RPC_URL`)}}{{println .}}{{end}}{{end}}'
   foreach ($n in $names) {
     $i = Invoke-Docker inspect $n --format '{{.State.Status}}|{{.State.Running}}|{{.State.StartedAt}}|{{.RestartCount}}'
     if ($LASTEXITCODE -ne 0 -or -not $i) { continue }
@@ -632,6 +632,13 @@ if ((Get-CacheAge $fleetCache) -gt 300) {
     $envLines = @(Invoke-Docker inspect $n --format $envTpl | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
     $net = "$($envLines | Where-Object { $_ -like 'XL1_NETWORK=*' } | Select-Object -First 1)" -replace '^XL1_NETWORK=', ''
     $reward = "$($envLines | Where-Object { $_ -like 'XL1_REWARD_ADDRESS=*' } | Select-Object -First 1)" -replace '^XL1_REWARD_ADDRESS=(0x)?', ''
+    # The Ethereum endpoint the time payload comes from: the host only. The URL
+    # is one of the image's secrets -- Alchemy and Infura carry the API key in
+    # its path -- so only the hostname leaves this loop. No host: the variable
+    # is unset and the image's default is in use.
+    $evmUrl = "$($envLines | Where-Object { $_ -like 'XL1_EVM_RPC_URL=*' } | Select-Object -First 1)" -replace '^XL1_EVM_RPC_URL=', ''
+    $evmHost = if ($evmUrl -match '^[A-Za-z][A-Za-z0-9+.-]*://(?:[^/?#@]*@)?([A-Za-z0-9.-]+)') { $Matches[1].ToLower() } else { $null }
+    $evmUrl = $null
     $raw = @(Get-LogSince '1h' -Tail 8000 -Name $n -Stamped)
     $msg = @($raw | ForEach-Object { $_ -replace '^\S+Z ', '' })
     $row = [ordered]@{
@@ -648,6 +655,7 @@ if ((Get-CacheAge $fleetCache) -gt 300) {
       retries            = @($msg | Where-Object { $_ -match 'Building block \d+ \(retry' }).Count
       validationFailures = @($msg | Where-Object { $_ -like '*Block validation failed*' }).Count
       rejected           = @($msg | Where-Object { $_ -like '*No candidate block can be appended*' }).Count
+      evmRpc             = [ordered]@{ host = $evmHost }
     }
     $tp = @($msg | ForEach-Object { if ($_ -match 'Generated time payload in (\d+)ms') { [int]$Matches[1] } } | Sort-Object)
     if ($tp.Count) {
