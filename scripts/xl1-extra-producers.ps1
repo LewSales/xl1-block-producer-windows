@@ -14,8 +14,9 @@
   networks are separate chains, so a key never competes with itself. The rule
   that keeps that true: never two producers with one key on the SAME network.
 
-  The extras run their own image tag (xl1:5.6.2 since 2026-10-11, the same CLI
-  as the Pi and the main node) so a Build.ps1 run, which retags xl1:local, never
+  The extras run their own image tag (xl1:5.7.2 since 2026-11-20 for the mainnet
+  pair; build it with Build.ps1 -CliVersion 5.7.2 -ProducerOnly, which also tags
+  xl1:5.7.2) so a Build.ps1 run, which retags xl1:local, never
   changes them by accident. Change this default only together with an upgrade:
   `up` without -Image recreates onto whatever it names.
 
@@ -34,7 +35,7 @@
 [CmdletBinding()]
 param(
   [ValidateSet('up', 'down', 'status')][string]$Action = 'status',
-  [string]$Image = 'xl1:5.6.2',
+  [string]$Image = 'xl1:5.7.2',
   [ValidateSet('xl1-seq-23b3', 'xl1-main-cc91', 'xl1-main-653e')][string]$Only
 )
 
@@ -45,10 +46,15 @@ $Tuning = Join-Path $Root 'compose\producer-tuning.yml'
 $Preset = Join-Path $Root 'presets\roles\producer.json'
 $PresetRest = Join-Path $Root 'presets\roles\producer-rest.json'
 
+# Roles = which preset folder the node mounts (owner call 2026-11-20, after Arie Trouw said his
+# leading homelab producer polls at 500 ms): cc91 reads presets\roles-mainnet-500 (500 ms, like
+# the Pi), 653e reads presets\roles-mainnet (1000 ms). Everything else in those files is
+# identical to presets\roles, which stays at 3000 for the sequence nodes and is what tests pin.
+# Both mainnet nodes use ethereum-rpc.publicnode.com for ETH; the Pi uses eth.drpc.org.
 $Extras = @(
-  @{ Project = 'xl1-seq-23b3'; Env = 'seq-23b3-producer.env'; Health = 9100 },
-  @{ Project = 'xl1-main-cc91'; Env = 'main-cc91-producer.env'; Health = 9101 },
-  @{ Project = 'xl1-main-653e'; Env = 'main-653e-producer.env'; Health = 9102 }
+  @{ Project = 'xl1-seq-23b3'; Env = 'seq-23b3-producer.env'; Health = 9100; Roles = 'roles' },
+  @{ Project = 'xl1-main-cc91'; Env = 'main-cc91-producer.env'; Health = 9101; Roles = 'roles-mainnet-500' },
+  @{ Project = 'xl1-main-653e'; Env = 'main-653e-producer.env'; Health = 9102; Roles = 'roles-mainnet' }
 )
 
 foreach ($x in $Extras) {
@@ -64,8 +70,9 @@ foreach ($x in $Extras) {
   $env:XL1_IMAGE = $Image
   $env:XL1_PULL_POLICY = 'never'
   $env:XL1_PRESET_ENV_FILE = "../../config/$($x.Env)"
-  $env:XL1_PRODUCER_PRESET = $Preset
-  $env:XL1_PRODUCER_PRESET_REST = $PresetRest
+  $env:XL1_PRODUCER_PRESET = Join-Path $Root "presets\$($x.Roles)\producer.json"
+  $env:XL1_PRODUCER_PRESET_REST = Join-Path $Root "presets\$($x.Roles)\producer-rest.json"
+  if (-not (Test-Path $env:XL1_PRODUCER_PRESET_REST)) { throw "missing $($env:XL1_PRODUCER_PRESET_REST)" }
   # Loopback only: the main node's 9099 is the one other machines read.
   $env:XL1_HEALTH_HOST_PORT = "127.0.0.1:$($x.Health)"
 
