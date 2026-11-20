@@ -40,7 +40,12 @@ foreach ($f in @(
   (Join-Path $Root 'scripts\xl1ctl.ps1'),
   (Join-Path $Root 'scripts\xl1-collect.ps1'),
   (Join-Path $Root 'scripts\xl1-alert.ps1'),
-  (Join-Path $Root 'tests\alert.test.ps1')
+  (Join-Path $Root 'scripts\xl1-perf-snapshot.ps1'),
+  (Join-Path $Root 'scripts\deploy-dashboard.ps1'),
+  (Join-Path $Root 'tests\alert.test.ps1'),
+  (Join-Path $Root 'scripts\xl1-publish.ps1'),
+  (Join-Path $Root 'tests\publish.test.ps1'),
+  (Join-Path $Root 'tests\collect-log-order.test.ps1')
 )) {
   if (-not (Test-Path $f)) { Bad "$(Split-Path -Leaf $f) -- missing"; continue }
   $errors = $null
@@ -138,6 +143,28 @@ else {
   if ($LASTEXITCODE -eq 0) { Ok 'alert tests passed' } else { Bad 'alert tests failed' }
 }
 
+# ---------------------------------------------------------- status publisher
+# A real git origin shared with a second writer: only this node's file is ever
+# staged, divergence is recovered without force, failures are kept and escalated.
+Step 'Status publisher'
+$publishTest = Join-Path $Root 'tests\publish.test.ps1'
+if (-not (Test-Path $publishTest)) { Bad 'tests\publish.test.ps1 -- missing' }
+else {
+  & powershell -NoProfile -ExecutionPolicy Bypass -File $publishTest | Out-Null
+  if ($LASTEXITCODE -eq 0) { Ok 'publisher stages only its own file and recovers from divergence' } else { Bad 'publisher tests failed (run tests\publish.test.ps1 for detail)' }
+}
+
+# ------------------------------------------------------------ collector logs
+# The collector pairs each build with the time payload logged just before it,
+# across docker's stdout and stderr; PowerShell delivers those out of order.
+Step 'Collector log order'
+$orderTest = Join-Path $Root 'tests\collect-log-order.test.ps1'
+if (-not (Test-Path $orderTest)) { Bad 'tests\collect-log-order.test.ps1 -- missing' }
+else {
+  & powershell -NoProfile -ExecutionPolicy Bypass -File $orderTest
+  if ($LASTEXITCODE -eq 0) { Ok 'log lines restored to write order' } else { Bad 'collector log-order tests failed' }
+}
+
 # ---------------------------------------------------------- dashboard behaviour
 Step 'Dashboard behaviour'
 if (-not $node) {
@@ -161,6 +188,28 @@ if (-not $node) {
     # Only what this script created. A real install is the operator's.
     if ($stubbed) { Remove-Item (Join-Path $Root 'dashboard\node_modules') -Recurse -Force -ErrorAction SilentlyContinue }
   }
+}
+
+# ------------------------------------------------------------- shipped config
+# Presets, bindings and what git would commit. Reads files only; safe on a
+# producing host.
+Step 'Shipped config'
+if (-not $node) {
+  Skip 'node not on PATH; config tests skipped'
+} else {
+  & node --test (Join-Path $Root 'tests\config.test.mjs')
+  if ($LASTEXITCODE -eq 0) { Ok 'config tests passed' } else { Bad 'config tests failed' }
+}
+
+# ------------------------------------------------- reference standard + methods
+# The public standard is held to its own rules; the daily-share method's
+# reference implementation is checked on synthetic data.
+Step 'Reference standard'
+if (-not $node) {
+  Skip 'node not on PATH; standard tests skipped'
+} else {
+  & node --test (Join-Path $Root 'tests\standards.test.mjs') (Join-Path $Root 'tests\share-by-day.test.mjs')
+  if ($LASTEXITCODE -eq 0) { Ok 'standard and method tests passed' } else { Bad 'standard or method tests failed' }
 }
 
 Write-Host ''

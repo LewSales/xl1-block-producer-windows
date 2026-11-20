@@ -9,6 +9,11 @@
 Runs a federated Sequence block producer on a Windows PC under Docker Desktop,
 with the same dashboard as the Raspberry Pi bundle.
 
+**Why it is configured the way it is:** see the
+[Oxyon Producer Reference Standard v1.0 (draft)](docs/standards/OXYON-PRODUCER-REFERENCE-STANDARD-v1.0.md).
+It covers the reasoning, the evidence, and how to reproduce the measurements.
+It is a community reference, not an XYO standard.
+
 ## Why this exists
 
 A Raspberry Pi 3 B+ builds a block in roughly seventeen seconds against a
@@ -23,6 +28,7 @@ changes that. A desktop CPU is the fix.
   dashboard.yml                                    the dashboard, mine
   scripts/xl1-collect.ps1                          scheduled task, writes state/producer-status.json
   scripts/xl1-alert.ps1                            scheduled task, reads /api/status and notifies
+  scripts/xl1-perf-snapshot.ps1                    read-only: accepted share, competitor shares, /statz over one window
   scripts/xl1ctl.ps1                               one command instead of two compose files
 ```
 
@@ -152,6 +158,12 @@ against a fixture served over loopback, and runs the dashboard suite against a
 stubbed SDK — no Docker, no producer, no network.
 `tests\dashboard.test.mjs` is the same file as the Pi bundle's, because
 `dashboard\` is the same source; keep it that way.
+
+Three suites read files only and are safe on a producing host:
+
+- `tests\config.test.mjs` checks the role presets: bindings, the selected interval, and that both roles agree. It also checks that no operator config or backup is committable, and that templates hold nothing secret-shaped.
+- `tests\standards.test.mjs` holds the reference standard to its own rules: links resolve, nothing secret-shaped or infrastructure-revealing appears, and no level is claimed while gaps remain.
+- `tests\share-by-day.test.mjs` checks the daily-share method's reference implementation.
 
 ## Alerts
 
@@ -379,12 +391,38 @@ accepted — and upstream is explicit that `Published block: …` in the log mea
 *candidate submitted*, not accepted. `xl1ctl.ps1 addr` shows the signing
 address, which is the one that has to be on the list.
 
-The producer receives **10% of the block reward**; the remainder funds the Step
-Rewards Pool.
+Being added to the list is not the same as being picked up. This host's Mainnet
+container (key `2152…cc91`) ran from 2026-10-08 and landed nothing until block
+#1,748,314 at 2026-10-09 22:16 UTC -- eight minutes after XYO's founder said he
+had found the finalizers were not picking up newly configured producer
+addresses and had just rolled them. If an authorised address still lands
+nothing, the finalizers' configuration is worth asking about.
 
-## Why this node wins fewer blocks than a Raspberry Pi
+The producer receives **10% of the block reward** today (5% before 2026-07-29 on
+Mainnet and 2026-07-28 on Sequence); the remainder funds the Step Rewards Pool.
+Read the reward from each block rather than assuming it: the table, with each
+boundary linked to XYO's block files, is at https://oxyon.io/xl1/about-data/#rewards.
 
-Because of how it reaches the internet, not because of the machine.
+**Stake, as of xl1-cli 5.6.2 (checked 2026-10-11).** Every Oxyon producer logs
+`Producer … has insufficient stake.` every few hours and still lands blocks, on
+both networks: stake is logged, not enforced for production. The node's own
+check wants only some active stake on the producer address (one atto) before it
+re-declares its intent; the protocol's thresholds come from network
+configuration and default to zero. XYO staked to the network staking pool
+(`1969…1969`, the usual choice in the staking app) is network stake, not stake on
+the producer, so it does not silence the complaint. XYO's founder has said the requirement is
+small ("like 1000 XYO or something") and may be enforced later; no figure is
+fixed in the 5.6.2 code. Details: the Pi bundle's README, "When a healthy node
+produces nothing".
+
+## Why this node won fewer blocks than a Raspberry Pi (September 2026)
+
+> **Dated record.** Measured 2026-09-02, at a longer poll interval and on a
+> phone hotspot. Conditions have changed since: on 2026-10-10, at 3000 ms, this
+> node's `productionCycle` p95 was 1077 ms over 24 hours. Kept for its method;
+> re-measure before relying on its numbers.
+
+Because of how it reached the internet, not because of the machine.
 
 Measured 2026-09-02 against the same endpoint, from both nodes, as pure TCP
 connect time — no TLS, no HTTP, no application:

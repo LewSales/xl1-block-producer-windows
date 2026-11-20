@@ -96,7 +96,7 @@
      sequence instead of whatever DOM order happened to fall out of a column
      balancer. */
   main#grid { display: flex; flex-direction: column; gap: 20px; padding: 20px; max-width: 1720px; margin: 0 auto; }
-  .kpi-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; }
+  .kpi-row { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; }
   @media (max-width: 1023px) { .kpi-row { grid-template-columns: repeat(3, 1fr); } }
   /* dense: a card spanning 2 columns leaves a 1-column gap beside it at its own
      row height, and without dense that gap stays empty until the grid runs out
@@ -108,10 +108,13 @@
   @media (max-width: 1279px) { .group-grid { grid-template-columns: repeat(2, 1fr); } }
   .card-lg { grid-column: span 2; }
   .card-full { grid-column: 1 / -1; }
+  /* Phones: ".group .group-heading" (not ".group-heading") hides the headings, since
+     the general rule further down would otherwise win on source order and stack
+     every heading at the top; the log carries --mo:999 so it stays last. */
   @media (max-width: 767px) {
     main#grid { display: flex; }
     .kpi-row, .group, .group-grid { display: contents; }
-    .group-heading { display: none; }
+    .group .group-heading { display: none; }
     [style*="--mo"] { order: var(--mo); }
   }
   /* A section is a heading and a divider, not another bordered box around its
@@ -175,7 +178,8 @@
   table.board tr.self td a.mono { color: inherit; }
   /* Four columns stretched across a 1280px card put the name and its numbers at
      opposite edges, which is a lot of eye travel to compare two rows. */
-  table.board { max-width: 760px; }
+  /* Seven columns now, above the block race: both tables share one cap so they line up. */
+  table.board, table.rc { max-width: 1100px; }
   .you-badge {
     display: inline-block; font-size: 9px; font-weight: 700; letter-spacing: 0.04em;
     padding: 1px 5px; border-radius: 999px; background: var(--accent); color: #17130a;
@@ -331,6 +335,27 @@
     letter-spacing: 0.03em; border: 1px solid var(--line); color: var(--muted);
     white-space: nowrap;
   }
+  /* The versions this node runs, in the header where nobody has to scroll for them. */
+  .verchip {
+    display: inline-flex; gap: 6px; align-items: center; font-size: 12px; font-weight: 600;
+    padding: 3px 9px; border-radius: 999px; white-space: nowrap;
+    border: 1px solid color-mix(in srgb, var(--acc-producer) 45%, var(--line));
+    background: color-mix(in srgb, var(--acc-producer) 10%, transparent); color: var(--fg);
+  }
+  .verchip .sep { color: var(--muted); font-weight: 400; }
+  .verchip b.warn { color: var(--warn); }
+  /* Producer identity: the same operator groups and colours as oxyon.io/xl1/producers/.
+     "Other" (no established owner) gets no operator colour, only a dashed outline. */
+  :root {
+    --op-oxyon-light: #E6C56A; --op-oxyon-dark: #98701D;
+    --op-jim-light: #80B9F1; --op-jim-dark: #24548C;
+    --op-freecryptoa-light: #83D4A7; --op-freecryptoa-dark: #176A48;
+    --op-system-light: #C7CBD1; --op-system-medium: #858B95; --op-system-dark: #454B55;
+    --op-other: #8d9199;
+  }
+  .pdot { display: inline-block; flex: none; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; }
+  .pdot.op-other { background: transparent; outline: 1px dashed var(--op-other); outline-offset: -1px; }
+  .op-tag { font-size: 10.5px; color: var(--muted); margin-left: 4px; }
   .logfoot { color: var(--muted); font-size: 11px; margin-top: 7px; }
   .banner {
     margin-top: 12px; padding: 10px 12px; border-radius: 8px; font-size: 12.5px;
@@ -338,6 +363,38 @@
     background: color-mix(in srgb, var(--bad) 10%, transparent); color: var(--fg);
   }
   .banner b { color: var(--bad); }
+
+  /* Block race (public race feed). Operator colours from OPERATORS via opColour(). */
+  .rc-head { display:flex; align-items:baseline; flex-wrap:wrap; gap:6px 10px; margin:0 0 6px }
+  .rc-lead { font-size:13px; font-weight:600 }
+  .rc-strip { display:flex; gap:2px; margin:5px 0 10px }
+  .rc-strip i { flex:1; height:22px; min-width:3px; border-radius:2px; background:var(--sw, color-mix(in srgb, var(--op-other) 35%, transparent)) }
+  .rc-strip i.mine { outline:2px solid var(--fg); outline-offset:-2px }
+  .rc-scroll { overflow-x:auto }
+  table.rc { width:100%; border-collapse:collapse; font-size:13px; min-width:520px }
+  table.rc th { text-align:right; font-weight:500; color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.06em; padding:5px 6px; border-bottom:1px solid var(--line) }
+  table.rc td { text-align:right; padding:5px 6px; border-bottom:1px solid var(--line); white-space:nowrap; vertical-align:middle }
+  table.rc td.rc-name, table.rc th.rc-name { text-align:left }
+  table.rc tr.self { background: color-mix(in srgb, var(--acc-producer) 14%, transparent); box-shadow: inset 3px 0 0 0 var(--acc-producer); font-weight:650 }
+  .rc-bar { display:block; height:8px; border-radius:4px; background:var(--line); overflow:hidden; min-width:80px }
+  .rc-bar i { display:block; height:100%; border-radius:4px; background:var(--sw, color-mix(in srgb, var(--op-other) 55%, transparent)) }
+  .rc-slots { display:flex; height:9px; border-radius:4px; overflow:hidden; background:var(--line); min-width:110px }
+  .rc-slots i, .rc-key i { display:block; height:100% }
+  .rc-slots .s1, .rc-key .s1 { background: color-mix(in srgb, var(--acc-race) 95%, transparent) }
+  .rc-slots .s2, .rc-key .s2 { background: color-mix(in srgb, var(--acc-producer) 85%, transparent) }
+  .rc-slots .s3, .rc-key .s3 { background: color-mix(in srgb, var(--acc-race) 40%, transparent) }
+  .rc-slots .s4, .rc-key .s4 { background: color-mix(in srgb, var(--muted) 45%, transparent) }
+  .rc-key { font-weight:400; text-transform:none; letter-spacing:0; margin-left:6px; white-space:nowrap }
+  .rc-key i { display:inline-block; width:8px; height:8px; border-radius:2px; margin:0 2px 0 4px }
+  .rc-tag { font-size:9.5px; color:var(--muted); border:1px solid var(--line); border-radius:999px; padding:0 5px; margin-left:3px }
+  @media (max-width: 680px) {
+    .rc-hide-sm { display:none }
+    table.rc { min-width:0 }
+    table.rc td, table.rc th { padding:5px 4px }
+    .rc-slots { min-width:48px }
+    .rc-key { display:none }
+    .rc-strip i { min-width:2px; height:18px }
+  }
 </style>
 </head>
 <body>
@@ -346,6 +403,7 @@
   <span class="chip" title="An independent project. Not built, endorsed, or supported by XYO.">unofficial</span>
   <span class="device mono" id="device" hidden></span>
   <span class="net" id="net">—</span>
+  <span class="verchip" id="verchip" hidden></span>
   <span class="addr mono" id="hdraddr" hidden></span>
   <span class="spacer"></span>
   <span class="updated" id="updated" hidden></span>
@@ -381,6 +439,136 @@ const dur = (s) => {
 // verifies once and then never reads again — used wherever a full address
 // would otherwise crowd out the number the card is actually about.
 const shortAddr = (a) => `${String(a ?? '').slice(0, 6)}…${String(a ?? '').slice(-4)}`
+
+// Producer names and colours: a copy of oxyon.io's identity registry
+// (oxyon-io-site src/static/xl1/app/labels.mjs, 2026-10-10), so this page names
+// every producer the way oxyon.io/xl1/producers/ does. An address with no
+// established owner is shown by address as Other -- never given a guessed name.
+const OPERATORS = {
+  sequence: {
+    ca08120874f071739d932b24da41cc13299123b3: ['Oxyon · 23b3', 'oxyon', 'dark'],
+    '2152e6aec996742fb6e52ae1aad87bd44f2ccc91': ['Oxyon · Windows', 'oxyon', 'light'],
+    a6567633ac83a7017f3a2ef20fbbed890a2adae9: ['Jim · Pi 4', 'jim', 'light'],
+    '30251291ac55017d90a3c892ab5604bdacf9bcde': ['Jim · Pi 4 (2)', 'jim', 'dark'],
+    fb4c535221f91c1811bd42f70b6ec305aa658551: ['FreeCryptoA', 'freecryptoa', 'dark'],
+    // XYO's own system producers, on the statement of XYO's founder to Oxyon's owner.
+    '81b835c16e6da6152b4d9ebd7e55162f762767a1': ['XYO · System 81b8', 'system', 'dark'],
+    '8a499c81cb6a8106933f66a6cfdd6ea6439575e3': ['XYO · System 8a49', 'system', 'medium'],
+    '7ac8355c0ed1b6404da1ce7fe87a23394bab8056': ['XYO · System 7ac8', 'system', 'light'],
+  },
+  mainnet: {
+    ca08120874f071739d932b24da41cc13299123b3: ['Oxyon · Pi', 'oxyon', 'dark'],
+    '2152e6aec996742fb6e52ae1aad87bd44f2ccc91': ['Oxyon · Windows', 'oxyon', 'light'],
+    a6567633ac83a7017f3a2ef20fbbed890a2adae9: ['Jim · Pi 4', 'jim', 'light'],
+    '30251291ac55017d90a3c892ab5604bdacf9bcde': ['Jim · Pi 4 (2)', 'jim', 'dark'],
+    fb4c535221f91c1811bd42f70b6ec305aa658551: ['FreeCryptoA', 'freecryptoa', 'dark'],
+    c3d1a1c9781a41e69c0d0892ac6541f50151979f: ['FreeCryptoA (2)', 'freecryptoa', 'light'],
+    // XYO's internal producers: the only Mainnet signers until external operators were admitted (2026-10-06).
+    cd8f4d09564ae6a9c90f05c8bc31197c651f5f18: ['XYO · System cd8f', 'system', 'dark'],
+    '3c4ef49e493d8d1800b62fc032372d8572abd8e1': ['XYO · System 3c4e', 'system', 'medium'],
+    '7bbf96a1eca9db6a170f7cc0851bd136830f8581': ['XYO · System 7bbf', 'system', 'light'],
+  },
+}
+let NET = 'sequence'
+const opOf = (addr) => {
+  const e = OPERATORS[NET]?.[String(addr ?? '').replace(/^0x/i, '').toLowerCase()]
+  return e ? { name: e[0], group: e[1], shade: e[2] } : { group: 'other' }
+}
+const opColour = (addr) => { const o = opOf(addr); return o.group === 'other' ? null : 'var(--op-' + o.group + '-' + o.shade + ')' }
+// The block race, from the public race feed the network's observer publishes
+// (the same feed oxyon.io's producer pages read). Read straight from GitHub by the
+// browser; fetched once a minute, drawn on every render from the cached copy.
+const RACE_FEEDS = {
+  mainnet: 'https://raw.githubusercontent.com/LewSales/xl1-status-data/main/race-mainnet.json',
+  sequence: 'https://raw.githubusercontent.com/LewSales/xl1-status-data/main/race.json',
+}
+const RACE = { net: undefined, data: undefined, err: undefined, at: 0, busy: false }
+function maybeLoadRace(net) {
+  if (typeof fetch !== 'function' || RACE.busy || !RACE_FEEDS[net] || (RACE.net === net && Date.now() - RACE.at < 60000)) return
+  if (RACE.net !== net) { RACE.data = undefined; RACE.err = undefined }
+  RACE.net = net; RACE.busy = true; RACE.at = Date.now()
+  fetch(RACE_FEEDS[net] + '?t=' + Date.now(), { cache: 'no-store' })
+    .then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json() })
+    .then((j) => { if (j.network && j.network !== net) throw new Error('race feed is for ' + j.network); RACE.data = j; RACE.err = undefined })
+    .catch((e) => { RACE.err = e.message })
+    .finally(() => { RACE.busy = false })
+}
+const racePct = (x) => (x === undefined || x === null || !Number.isFinite(x)) ? '—' : (x * 100).toFixed(1) + '%'
+function raceSelf(self) { return RACE.data?.producers?.find((p) => p.address === self) }
+function raceCard(self) {
+  const r = RACE.data
+  const body = !r
+    ? `<div class="sub">${RACE.err ? 'The race feed could not be read (' + esc(RACE.err) + ').' : 'Loading the race feed…'}</div>`
+    : (() => {
+      const byName = new Map((r.producers ?? []).map((p) => [p.name, p.address]))
+      const addrOf = (k) => byName.get(k) ?? (r.producers ?? []).find((p) => k && p.address?.startsWith(String(k).toLowerCase()))?.address ?? ''
+      const nm = (a) => { const o = opOf(a); return o.name ?? shortAddr(a) }
+      const sw = (a) => opColour(a) ? '--sw:' + opColour(a) : ''
+      const slotN = (p, k) => Number(p.slot?.[k] ?? 0)
+      const at2 = (p) => slotN(p, '2') ? Number(p.winAt?.['2'] ?? 0) / slotN(p, '2') : undefined
+      const oth = (p) => { const n = ['1', '3', '4'].reduce((a, k) => a + slotN(p, k), 0); const w = ['1', '3', '4'].reduce((a, k) => a + Number(p.winAt?.[k] ?? 0), 0); return n ? w / n : undefined }
+      const ps = [...(r.producers ?? [])].filter((p) => p.heights > 0).sort((a, b) => b.winPct - a.winPct)
+      const me = ps.find((p) => p.address === self)
+      const recent = (r.heights ?? []).slice().sort((a, b) => a.n - b.n).slice(-72)
+      const strip = recent.map((h) => {
+        const a = addrOf(h.winner), mine = a === self
+        const myRow = (h.rows ?? []).find((x) => addrOf(x.p) === self)
+        const t = '#' + num(h.n) + ' won by ' + nm(a) + (myRow ? (mine ? ' · ours' : ' · our candidate arrived ' + myRow.rank + (['th', 'st', 'nd', 'rd'][myRow.rank] ?? 'th')) : ' · no candidate from us seen')
+        return `<i class="${mine ? 'mine' : ''}" style="${sw(a)}" title="${esc(t)}"></i>`
+      }).join('')
+      const rows = ps.map((p) => {
+        const t = ['1', '2', '3', '4'].reduce((a, k) => a + slotN(p, k), 0) || 1
+        const sl = ['1', '2', '3', '4'].map((k) => slotN(p, k) / t)
+        const self_ = p.address === self, other = opOf(p.address).group === 'other'
+        return `<tr class="${self_ ? 'self' : ''}">
+          <td class="rc-name">${pdot(p.address)}${esc(nm(p.address))}${other ? ' <span class="rc-tag">Other</span>' : ''}${self_ ? ' <span class="you-badge">YOU</span>' : ''}</td>
+          <td class="rc-hide-sm"><span class="rc-bar"><i style="width:${Math.min(100, p.winPct * 2.5)}%;${sw(p.address)}"></i></span></td>
+          <td>${p.winPct}%</td><td class="rc-hide-sm">${num(p.wins)}</td>
+          <td><span class="rc-slots" title="Arrival order among valid candidates: 1st ${racePct(sl[0])}, 2nd ${racePct(sl[1])}, 3rd ${racePct(sl[2])}, 4th+ ${racePct(sl[3])}">${sl.map((v, i) => `<i class="s${i + 1}" style="width:${v * 100}%"></i>`).join('')}</span></td>
+          <td>${racePct(at2(p))}</td><td class="rc-hide-sm">${racePct(oth(p))}</td></tr>`
+      }).join('')
+      const rulePct = r.rule && r.heightsAnalysed ? r.rule.newestAt2nd / r.heightsAnalysed : undefined
+      return `${me
+          ? `<div class="rc-head"><span class="big">${me.winPct}%</span> <span class="sub">of ${num(me.heights)} heights won</span>
+             <span class="rc-lead">2nd valid arrival in ${racePct(slotN(me, '2') / Math.max(1, me.heights))} of heights · wins ${racePct(at2(me))} of those</span></div>`
+          : '<div class="rc-head"><span class="sub">This producer is not in the current race window.</span></div>'}
+        <div class="sub">Last ${recent.length} heights, oldest first · outlined = won by this producer</div>
+        <div class="rc-strip">${strip}</div>
+        <div class="rc-scroll"><table class="rc">
+          <thead><tr><th class="rc-name">Producer</th><th class="rc-hide-sm"></th><th>Win rate</th><th class="rc-hide-sm">Wins</th>
+            <th title="How often its candidate was the 1st, 2nd, 3rd or 4th+ valid one to arrive">Arrival order <span class="rc-key"><i class="s1"></i>1 <i class="s2"></i>2 <i class="s3"></i>3 <i class="s4"></i>4+</span></th>
+            <th title="Share of heights won when its candidate was the 2nd valid arrival">Wins when 2nd</th><th class="rc-hide-sm">Otherwise</th></tr></thead>
+          <tbody>${rows}</tbody></table></div>
+        <div class="sub" style="margin-top:8px">${num(r.heightsAnalysed)} heights${r.window?.from ? ', ' + new Date(r.window.from).toLocaleString() + ' – ' + new Date(r.window.to).toLocaleTimeString() : ''}, from one observer polling the pending pool every 0.5 s (ties inside a tick are common, so arrival order is approximate).
+          ${rulePct !== undefined ? 'The winner was the newest of the first two valid candidates in ' + racePct(rulePct) + ' of heights. ' : ''}The previous block's producer cannot win while another valid candidate exists.</div>`
+    })()
+  return `<section class="card-full" style="--c: var(--acc-race); --mo:49">
+      <h2><span class="ico" aria-hidden="true">⚔️</span>Block race</h2>${body}</section>`
+}
+
+const pdot = (addr) => {
+  const c = opColour(addr)
+  return c ? '<i class="pdot" style="background:' + c + '"></i>' : '<i class="pdot op-other" title="Other: no established owner"></i>'
+}
+/** Rename every producer row in the payload from the registry: a listed address
+ *  gets its oxyon.io name; any other address loses whatever local label it had
+ *  and is shown by address, as Other. Rows are recognised by a 40-hex address. */
+function applyRegistry(d) {
+  NET = d.chain?.network ?? NET
+  const seen = new Set()
+  const walk = (v) => {
+    if (!v || typeof v !== 'object' || seen.has(v)) return
+    seen.add(v)
+    if (Array.isArray(v)) { v.forEach(walk); return }
+    if (typeof v.address === 'string' && /^(0x)?[0-9a-f]{40}$/i.test(v.address)) {
+      const o = opOf(v.address)
+      v.label = o.name ?? (v.isSelf ? 'this node' : undefined)
+      v.op = o.group
+    }
+    for (const k of Object.keys(v)) walk(v[k])
+  }
+  walk(d.peers); walk(d.network); walk(d.movement); walk(d.race)
+}
 // A focusable info glyph rather than a bare title="" on running text: the
 // same explanation, but reachable with a keyboard and revealed on
 // :focus-visible as well as :hover.
@@ -427,9 +615,9 @@ const tiles = (items) => `<div class="tiles">${items.filter(Boolean).map(([k, v,
  *  rescales. The delta answers the question actually being asked: WHEN did
  *  something happen, and how much.
  *
- *  It reads especially well for rewards, where the chain pays in fixed 50 XL1
- *  steps: every bar is a block won, and the gaps between bars are the dry
- *  spells. `summary` turns the same numbers into one line of plain language,
+ *  It reads especially well for rewards, where each won block adds one fixed
+ *  payment (its size is set by the chain's reward schedule -- see Rewards):
+ *  every bar is a block won, and the gaps between bars are the dry spells. `summary` turns the same numbers into one line of plain language,
  *  because a bar chart with no scale is still just a shape.
  */
 const sparkDelta = (series, cls = '', summary) => {
@@ -503,6 +691,7 @@ function setStatusPill(state, label) {
 // page is read. Every one is a re-read of a field the rest of the page
 // already renders elsewhere — nothing here is computed twice, and nothing
 // here costs a request the polling loop was not already making.
+const SELF_ADDR = (d) => String(d.peers?.self?.address ?? d.chain?.balances?.producer?.address ?? '').replace(/^0x/i, '').toLowerCase()
 function kpiRow(d) {
   const dv = d.derived ?? {}
   const pb = d.peers ?? {}
@@ -532,14 +721,27 @@ function kpiRow(d) {
     tile(30, '🕐', 'Last 24h', last24 !== undefined ? num(last24) : '—', last24Sub, last24 === undefined ? 'sub' : '', '--acc-race'),
     tile(40, '🥧', 'Observed share', shareVal, shareVal === '—' ? null : 'of scanned blocks', shareVal === '—' ? 'sub' : '', '--acc-network'),
     tile(45, '⛓️', 'Current block', blockVal, blockOk ? 'current' : null, blockOk ? '' : 'bad', '--acc-chain'),
+    (() => { const m = raceSelf(SELF_ADDR(d)); return tile(46, '⚔️', 'Race win rate', m ? m.winPct + '%' : '—', m ? 'of ' + num(m.heights) + ' heights' : (RACE.err ? 'race feed unavailable' : 'loading'), m ? '' : 'sub', '--acc-race') })(),
   ].join('')
 }
 
 function render(d) {
+  applyRegistry(d)
   const failed = false
   const state = headerState(d, failed)
   setStatusPill(state)
   $('net').textContent = d.chain?.ok ? `${d.chain.networkName} · chain ${d.chain.chainId.slice(0, 10)}…` : 'chain unreachable'
+
+  // Dashboard and CLI versions, up front: the first thing asked about a node.
+  const vc = $('verchip')
+  const cliNow = d.release?.installed
+  if (d.build?.version || cliNow) {
+    vc.innerHTML = [d.build?.version && ('dashboard <b>' + esc(d.build.version) + '</b>'),
+      cliNow && ('xl1-cli <b' + (d.release?.lag && d.release.lag !== 'current' ? ' class="warn"' : '') + '>' + esc(cliNow) + '</b>')]
+      .filter(Boolean).join('<span class="sep">·</span>')
+    vc.title = d.release?.latest ? 'latest xl1-cli: ' + d.release.latest : ''
+    vc.hidden = false
+  } else vc.hidden = true
 
   const deviceEl = $('device')
   const deviceLabel = d.system?.hostname || d.node?.host?.hostname
@@ -578,7 +780,9 @@ function render(d) {
   // matching regexes against their own rendered <h2> text. Simpler, and there
   // is nothing to keep in sync between where a card is written and where it
   // appears — it appears wherever it was pushed.
-  const groups = { performance: [], network: [], production: [], analytics: [] }
+  const groups = { race: [], performance: [], network: [], production: [], analytics: [] }
+  maybeLoadRace(NET)
+  let softwareCard = ''
   let bannerHtml = ''
   let logHtml = ''
   const dv = d.derived ?? {}
@@ -726,9 +930,38 @@ function render(d) {
           b.producer && !dv.rewardEqualsProducer && ['Producer address', addrCell(b.producer)],
         ])}
       </details>
-      <div class="sub" style="margin-top:7px" title="At step 0 the block reward is 500 XL1 and the producer share is 10%. Only accepted blocks pay — a published candidate that loses its race earns nothing.">
-        Each accepted block pays <strong>~50 XL1</strong> — 10% of the 500 XL1 block reward.
-      </div>
+      ${(() => {
+        // The per-block figure comes from the chain: the reward transfer
+        // recorded in this node's latest block. The protocol schedule is shown
+        // only as a labelled fallback, and the next step as a forecast.
+        const rw = dv.rewards ?? {}
+        const pb = rw.perBlock
+        const lead = pb
+          ? `Each accepted block pays <strong>${esc(pb.xl1)} XL1</strong>${pb.source === 'recorded'
+              ? ` — recorded in block #${num(pb.block)}${pb.ofTotalXl1 ? ` (10% of ${esc(pb.ofTotalXl1)} XL1)` : ''}`
+              : ' — from the protocol schedule (no recorded payment seen yet)'}.`
+          : 'Per-block reward: not yet seen on chain.'
+        const next = rw.nextStep ? ` Next step at block #${num(rw.nextStep.atBlock)} → ${esc(rw.nextStep.xl1)} XL1 (${num(rw.nextStep.blocksAway)} blocks away).` : ''
+        return `<div class="sub" style="margin-top:7px" title="XL1's block reward starts at 500 XL1 and falls by 5% every 1,000,000 blocks (floor 10 XL1); the producer is paid 10% of it by a transfer recorded in the block. Only accepted blocks pay — a published candidate that loses its race earns nothing.${rw.nextStep ? ' Next step basis: ' + esc(rw.nextStep.basis) + '.' : ''}">${lead}${next}</div>`
+      })()}
+      ${(() => {
+        const rw = dv.rewards ?? {}
+        if (!rw.earned) return ''
+        return dl([
+          rw.lifetime && ['Lifetime blocks', `${num(rw.lifetime.blocks)} <span class="sub">since block #${num(rw.lifetime.firstBlock)} · read from the chain back to block 1</span>`],
+          rw.lifetime && ['Lifetime rewards', `${esc(rw.lifetime.earnedXl1)} XL1 <span class="sub">${rw.lifetime.unrecordedBlocks ? `${num(rw.lifetime.unrecordedBlocks)} block(s) unrecorded` : 'every block recorded on chain'} · fees ${esc(rw.lifetime.feesXl1)} XL1</span>`],
+          !rw.lifetime && rw.history && ['Lifetime history', `<span class="sub">reading the chain backwards: ${num(rw.history.percent)}% (down to block #${num(rw.history.coveredDownTo)})${rw.history.error ? ' — ' + esc(rw.history.error) : ''}; lifetime totals appear when it reaches block 1</span>`],
+          ['Rewards since scanning began', `${esc(rw.earned.xl1)} XL1 ${info('Recorded = read from the reward transfer inside each of this node’s blocks. Reconstructed = blocks counted before recording began, priced only where one verified reward era covers them. Estimated = blocks whose transfer could not be read, priced by the protocol schedule. Fees are listed separately.')}`],
+          rw.recorded?.blocks && ['Recorded on chain', `${esc(rw.recorded.xl1)} XL1 <span class="sub">${num(rw.recorded.blocks)} block(s) since #${num(rw.recorded.since)}</span>`],
+          rw.inScanRecorded && ['Before recording', `${esc(rw.inScanRecorded.xl1)} XL1 <span class="sub">${num(rw.inScanRecorded.blocks)} block(s) · read from the chain${rw.inScanRecorded.discrepancy ? ` · <span class="warn">${esc(rw.inScanRecorded.discrepancy)}</span>` : ''}</span>`],
+          !rw.inScanRecorded && rw.reconstructed && ['Before recording', rw.reconstructed.xl1 !== undefined
+            ? `${esc(rw.reconstructed.xl1)} XL1 <span class="sub">${num(rw.reconstructed.blocks)} block(s) × ${esc(rw.reconstructed.perBlockXl1)} · reconstructed</span>`
+            : `<span class="warn">unknown</span> <span class="sub">${num(rw.reconstructed.blocks)} block(s) — not inside one verified reward era</span>`],
+          rw.estimated && ['Estimated', `${esc(rw.estimated.xl1)} XL1 <span class="sub">${num(rw.estimated.blocks)} block(s) without a readable transfer</span>`],
+          rw.unknownBlocks && ['Unknown', `<span class="warn">${num(rw.unknownBlocks)} block(s)</span> <span class="sub">no recorded transfer and no reliable schedule</span>`],
+          rw.fees?.xl1 && rw.fees.xl1 !== '0' && ['Transaction fees', `${esc(rw.fees.xl1)} XL1 <span class="sub">paid to this node inside its blocks</span>`],
+        ])
+      })()}
       ${bw ? tiles([
         // One cumulative total cannot tell a node earning steadily from one that
         // earned it all yesterday. The hour is withheld until the ring covers
@@ -745,7 +978,7 @@ function render(d) {
         ['All time', bw.total !== undefined ? num(bw.total) : '—', 'since scanning began'],
       ]) : ''}
       ${sparkDelta(d.history?.reward, '', (total, active, intervals, max) =>
-        // The chain pays ~50 XL1 per block, so each bar is a win and the count
+        // Each won block adds one payment, so each bar is a win and the count
         // of non-empty intervals is how many times this node was paid.
         total > 0
           ? `+${num(Number(total.toFixed(4)))} XL1 · ${num(active)} payout(s)`
@@ -771,9 +1004,10 @@ function render(d) {
       ? `${cur} ${num(Number((xl1 * pr.value).toFixed(2)))}` : undefined
     const sinceXl1 = Number(String(b.reward?.sinceStart?.xl1 ?? '').replace(/,/g, ''))
     const sinceWorth = worthOf(sinceXl1)
-    // The chain pays ~50 XL1 per accepted block; Rewards states that in XL1, so
-    // this states the same block in the other unit rather than repeating it.
-    const blockWorth = worthOf(50)
+    // The per-block payment as the chain recorded it (Rewards states it in
+    // XL1); this states the same block in the other unit.
+    const perBlockXl1 = Number(dv.rewards?.perBlock?.xl1)
+    const blockWorth = worthOf(perBlockXl1)
 
     if (pr.configured || pr.marketNote) {
       groups.performance.push(`<section style="--c: var(--acc-rewards); --mo:64">
@@ -806,7 +1040,7 @@ function render(d) {
                 ? `${esc(b.reward.sinceStart.xl1)} XL1`
                 : `${esc(b.reward.sinceStart.xl1)} XL1 <span class="sub">≈ ${esc(sinceWorth)}</span>`],
             // Also withheld on a test network, for the same reason as the balance.
-          blockWorth && !pr.marketNote && ['Per accepted block', `~50 XL1 <span class="sub">≈ ${esc(blockWorth)}</span>`],
+          blockWorth && !pr.marketNote && ['Per accepted block', `${esc(dv.rewards.perBlock.xl1)} XL1 <span class="sub">≈ ${esc(blockWorth)}${dv.rewards.perBlock.source === 'recorded' ? '' : ' · schedule'}</span>`],
             // A quote that stopped updating is worse than none: it looks current.
             pr.ok === false && ['Quote', `<span class="warn">stale — ${esc(pr.error)}</span>`],
           ])}
@@ -903,8 +1137,8 @@ function render(d) {
         ])}
         ${co.producers > 0 ? `<div class="conc-bar" title="Observed share, largest producer first">${
           topRows.map((r, i) => `<i class="${i < (co.nakamoto ?? 0) ? 'nk' : ''}" style="width:${Math.max(0.5, r.sharePercent ?? 0)}%${
-            r.isSelf ? ';background:var(--ok)' : ''}" title="${esc(r.label ?? shortAddr(r.address))} — ${r.sharePercent}%"></i>`).join('')
-        }</div><div class="sub" style="margin-top:4px"><span class="ok">green is this node</span> · outlined segments are counted toward the Nakamoto coefficient</div>` : ''}
+            (opColour(r.address) ? ';background:' + opColour(r.address) : ';background:transparent;outline:1px dashed var(--op-other);outline-offset:-1px') + (r.isSelf ? ';box-shadow:inset 0 0 0 2px var(--fg)' : '')}" title="${esc(r.label ?? shortAddr(r.address))} — ${r.sharePercent}%"></i>`).join('')
+        }</div><div class="sub" style="margin-top:4px">coloured by operator, as on oxyon.io (dashed = Other) · the ringed segment is this node · outlined segments are counted toward the Nakamoto coefficient</div>` : ''}
         <div class="banner">Observed by this dashboard over blocks ${num(ob.fromBlock)}–${num(ob.toBlock)}, not a
           protocol-wide census. A producer that never appeared in that window is not counted.</div>
       </section>`)
@@ -1038,11 +1272,14 @@ function render(d) {
     if (fl) {
       const dot = (n) => !n.ok ? 'bad'
         : n.status === 'down' ? 'bad' : n.status === 'degraded' ? 'warn' : 'ok'
+      const netName = (x) => x ? x.charAt(0).toUpperCase() + x.slice(1) : '—'
+      const mixed = (fl.networks?.length ?? 0) > 1
       const row = (n) => `<tr${n.isSelf ? ' class="self"' : ''}>
         <td><span class="alert-dot ${dot(n)}">●</span> ${esc(n.label)}${n.isSelf ? ' <span class="you-badge">YOU</span>' : ''}</td>
         <td>${n.ok
           ? `<span class="${n.status === 'ok' ? 'ok' : n.status === 'down' ? 'bad' : 'warn'}">${esc(n.status)}</span>`
           : `<span class="bad">unreachable</span>`}</td>
+        <td${n.network && n.network !== fl.combinedNetwork ? ' class="warn"' : ''}>${esc(netName(n.network))}</td>
         <td>${n.blocksTotal !== undefined ? num(n.blocksTotal) : '—'}</td>
         <td>${n.sharePercent !== undefined ? n.sharePercent + '%' : '—'}</td>
         <td>${n.rank !== undefined ? '#' + num(n.rank) + (n.producers ? ' of ' + num(n.producers) : '') : '—'}</td>
@@ -1054,19 +1291,34 @@ function render(d) {
           ? esc(n.version ?? '—')
           : esc((n.error ?? 'no answer') + (n.lastSeenAt ? ' · last seen ' + new Date(n.lastSeenAt).toLocaleTimeString() : ''))}</td>
       </tr>`
+      // Each producer behind a peer's dashboard, under that peer. A host running
+      // four producers on two chains otherwise reads as one node on one chain.
+      // Standings on this node's chain come from this node's own table.
+      const subRow = (lp) => `<tr>
+        <td style="padding-left:18px">↳ ${esc(lp.label ?? lp.id ?? '—')}${lp.label && lp.id ? ` <span class="sub">${esc(lp.id)}</span>` : ''}</td>
+        <td>${lp.running ? '<span class="ok">running</span>' : '<span class="bad">stopped</span>'}</td>
+        <td${lp.network && lp.network !== fl.combinedNetwork ? ' class="warn"' : ''}>${esc(netName(lp.network))}</td>
+        <td>${lp.blocksTotal !== undefined ? num(lp.blocksTotal) : '—'}</td>
+        <td>${lp.sharePercent !== undefined ? lp.sharePercent + '%' : '—'}</td>
+        <td>${lp.rank !== undefined ? '#' + num(lp.rank) : '—'}</td>
+        <td class="sub">—</td>
+        <td class="sub">${lp.payloadP50Ms !== undefined ? `payload ${num(lp.payloadP50Ms)} ms` : '—'}${lp.payloadSlow ? ` · <span class="warn">${num(lp.payloadSlow)} slow</span>` : ''}${lp.evmHost ? ` · ${esc(lp.evmHost)}` : ''}</td>
+      </tr>`
       groups.analytics.push(`<section class="card-full" style="--c: var(--acc-analytics); --mo:104">
         <h2><span class="ico" aria-hidden="true">🛰️</span>Fleet</h2>
         <div class="big ${fl.reachable === fl.total ? 'ok' : 'warn'}">${num(fl.reachable)}<span class="sub" style="font-size:16px"> of ${num(fl.total)}</span></div>
         <div class="sub">nodes answering${fl.combinedBlocks !== undefined
-          ? ` · ${num(fl.combinedBlocks)} block(s) between ${num(fl.combinedFrom)} of them` : ''}</div>
+          ? ` · ${num(fl.combinedBlocks)} block(s) between ${num(fl.combinedFrom)} of them${mixed ? ` on ${esc(netName(fl.combinedNetwork))}` : ''}` : ''}</div>
         <table class="board">
-          <thead><tr><th>Node</th><th>State</th><th>Blocks</th><th>Share</th><th>Rank</th><th>Alerts</th><th>Build</th></tr></thead>
-          <tbody>${fl.nodes.map(row).join('')}</tbody>
+          <thead><tr><th>Node</th><th>State</th><th>Network</th><th>Blocks</th><th>Share</th><th>Rank</th><th>Alerts</th><th>Build</th></tr></thead>
+          <tbody>${fl.nodes.map((n) => row(n) + (Array.isArray(n.localProducers) ? n.localProducers.map(subRow).join('') : '')).join('')}</tbody>
         </table>
         ${fl.combinedSharePercent !== undefined
           ? `<div class="sub">combined share of the chain: ${fl.combinedSharePercent}%</div>`
           : `<div class="sub">No combined share: each node scans its own window, and shares only add up when
               they cover the same blocks. The block counts above are each node's own tally.</div>`}
+        ${mixed ? `<div class="sub">These nodes are on different networks (${fl.networks.map((x) => esc(netName(x))).join(', ')}).
+              Each node's blocks, share and rank are on its own network, and only nodes on ${esc(netName(fl.combinedNetwork))} are added together.</div>` : ''}
         ${fl.rejected?.length ? `<div class="sub warn">ignored: ${fl.rejected.map(esc).join('; ')}</div>` : ''}
         <div class="sub">peers polled every ${num(fl.pollSeconds)}s · each is another dashboard, never the chain</div>
       </section>`)
@@ -1130,7 +1382,7 @@ function render(d) {
         ${(() => {
           const rows = Object.entries(ops.stages).filter(([, v]) => Number.isFinite(v))
           const top = Math.max(...rows.map(([, v]) => v), 1)
-          const names = { headFetch: 'head fetch', blockProduction: 'build', mempoolTx: 'mempool tx', mempoolBlocks: 'mempool blocks', submit: 'submit' }
+          const names = { headFetch: 'head fetch', blockProduction: 'build', mempoolTx: 'mempool tx', mempoolBlocks: 'mempool blocks', submit: 'submit', timePayload: 'time payload', rewardTransfers: 'reward transfers' }
           return rows.sort((a, b) => b[1] - a[1]).map(([k, v]) => `<div class="lat-row">
             <span class="sub">${esc(names[k] ?? k)}</span><span class="mono">${num(v)} ms</span>
             <span class="lat-bar"><i style="width:${Math.max(2, (v / top) * 100)}%"></i></span>
@@ -1360,6 +1612,48 @@ function render(d) {
     </section>`)
   }
 
+  // Time payload — the wait before every candidate on Ethereum's latest block.
+  //
+  // On 2026-10-22 the image's default Ethereum endpoint hung 15-140 s at a time
+  // for about an hour and a half. Every candidate built after such a wait landed
+  // late, and nothing on this page moved: the node was up, healthy and building.
+  // One row per producer this host runs; the endpoint is shown by host only.
+  const tpv = d.timePayload
+  if (tpv?.producers?.length) {
+    const many = tpv.producers.length > 1
+    const ms = (v) => (Number.isFinite(v) ? `${num(v)} ms` : '—')
+    const name = (p) => (p.id === 'self' ? 'this producer' : p.id)
+    const host = (p) => (p.endpoint?.host ? `<span class="mono">${esc(p.endpoint.host)}</span>` : '<span class="sub">image default</span>')
+    const share = (p) => (p.measured ? p.slow / p.measured : 0)
+    const slowCell = (p) => (!p.measured ? '<span class="sub">—</span>'
+      : `<span class="${!p.slow ? 'ok' : share(p) >= tpv.alertShare && p.measured >= tpv.alertMin ? 'bad' : 'warn'}">${num(p.slow)} of ${num(p.measured)}</span>`)
+    const one = tpv.producers[0]
+    const headline = tpv.alerts?.length
+      ? `<div class="big bad">${num(tpv.alerts.length)} <span style="font-size:14px;color:var(--muted)">producer(s) waiting on slow payloads</span></div>`
+      : many
+        ? `<div class="big ok">${num(tpv.producers.filter((p) => p.measured).length)} <span style="font-size:14px;color:var(--muted)">of ${num(tpv.producers.length)} producers measured, none slow</span></div>`
+        : `<div class="big">${ms(one.p50Ms)} <span style="font-size:14px;color:var(--muted)">typical</span></div>`
+    groups.production.push(`<section${many ? ' class="card-full"' : ''} style="--c: var(--acc-latency); --mo:85">
+      <h2><span class="ico" aria-hidden="true">⏱️</span>Time payload</h2>
+      ${headline}
+      ${(tpv.alerts ?? []).map((a) => `<div class="sub bad">${esc(a)}</div>`).join('')}
+      <div class="board-wrap"><table class="board">
+        <thead><tr><th>Producer</th><th>Ethereum RPC</th><th>p50 / p90</th><th>Max</th><th>Over ${num(one.slowOverMs / 1000)} s</th><th>Rejected</th></tr></thead>
+        <tbody>${tpv.producers.map((p) => `<tr>
+          <td>${esc(name(p))}${many && p.network ? ` <span class="sub">${esc(p.network)}</span>` : ''}</td>
+          <td>${host(p)}</td>
+          <td>${ms(p.p50Ms)} / ${ms(p.p90Ms)}</td>
+          <td>${ms(p.maxMs)}</td>
+          <td>${slowCell(p)}</td>
+          <td>${p.rejected ? `<span class="warn">${num(p.rejected)}</span>` : '0'}</td>
+        </tr>`).join('')}</tbody>
+      </table></div>
+      <div class="sub" style="margin-top:7px">Last hour, from each build's own log line. A payload over
+        ${num(one.slowOverMs / 1000)} s usually means that candidate arrived too late. Alerts when ${num(tpv.alertShare * 100)}% or more
+        of at least ${num(tpv.alertMin)} payloads are slow; the hour is rolling, so an alert clears up to an hour after the endpoint recovers.</div>
+    </section>`)
+  }
+
   // Software and host — the two layers that rot quietly while every other
   // signal on this page stays green. Last in this group, not first: it is
   // housekeeping an operator checks occasionally, behind the three cards that
@@ -1383,7 +1677,9 @@ function render(d) {
       : aptAge > 48 ? `<span class="warn">${Math.round(aptAge / 24)}d</span>`
       : `<span class="ok">${aptAge < 1 ? '<1' : Math.round(aptAge)}h</span>`
 
-    groups.production.push(`<section style="--c: var(--acc-ops); --mo:86">
+    // Second box on the page, straight after Producer: which versions this node
+    // runs is the first thing anyone checking on it asks.
+    softwareCard = (`<section style="--c: var(--acc-ops); --mo:61">
       <h2><span class="ico" aria-hidden="true">📦</span>Software &amp; host</h2>
       <div class="big">${esc(rel.installed ?? '—')}</div>
       <div class="sub">xl1&#8209;cli in the running container</div>
@@ -1440,7 +1736,8 @@ function render(d) {
         ? `<a class="mono" href="${esc(r.url)}" target="_blank" rel="noopener noreferrer" title="${esc(r.address)}">${esc(short(r.address))}</a>`
         : `<span class="mono" title="${esc(r.address)}">${esc(short(r.address))}</span>`
       const you = r.isSelf ? ' <span class="you-badge">YOU</span>' : ''
-      return (name ? `<span class="peer-name">${esc(name)}</span> ${hex}` : hex) + you
+      const other = r.op === 'other' ? '<span class="op-tag">Other</span>' : ''
+      return pdot(r.address) + (name ? `<span class="peer-name">${esc(name)}</span> ${hex}` : hex) + other + you
     }
 
     const rows = [...(pb.top ?? [])]
@@ -1471,7 +1768,7 @@ function render(d) {
     const tr_ = (r, cls = '') => `<tr class="${cls}${r.isSelf ? ' self' : ''}">
       <td>${num(r.rank)}</td>
       <td>${nameCell(r)}</td>
-      <td class="barcell"><div class="peer-bar"><i style="width:${Math.max(r.sharePercent ? 2 : 0, ((r.sharePercent ?? 0) / lead) * 100)}%"></i></div></td>
+      <td class="barcell"><div class="peer-bar"><i style="width:${Math.max(r.sharePercent ? 2 : 0, ((r.sharePercent ?? 0) / lead) * 100)}%;background:${opColour(r.address) ?? 'color-mix(in srgb, var(--op-other) 55%, transparent)'}"></i></div></td>
       <td>${cell(wToday, r.address)}</td>
       <td>${cell(wWeek, r.address)}</td>
       <td>${num(r.blocks)}</td>
@@ -1504,7 +1801,7 @@ function render(d) {
          ${standing(wToday, 'today')}
          ${standing(wWeek, '7 days')}`
 
-    groups.network.push(`<section class="card-full" style="--c: var(--acc-network); --mo:110">
+    groups.race.push(`<section class="card-full" style="--c: var(--acc-network); --mo:47">
       <h2><span class="ico" aria-hidden="true">🏁</span>Producer standings</h2>
       ${mine
         ? `<div class="big">#${num(mine.rank)} <span style="font-size:14px;color:var(--muted)">of ${num(pb.producers)}</span></div>
@@ -1547,7 +1844,7 @@ function render(d) {
   // Log tail, newest first, outside every group and always last — a scroll box
   // this size reads as an afterthought anywhere but the bottom of the page.
   if (d.node?.recentLog?.length) {
-    logHtml = `<section class="card-full">
+    logHtml = `<section class="card-full" style="--mo:999">
       <h2><span class="ico" aria-hidden="true">📜</span>Producer log — newest first (${d.node.recentLog.length} lines)</h2>
       <pre class="log">${esc([...d.node.recentLog].reverse().join('\n'))}</pre>
       <div class="logfoot">Most recent at the top. Collected ${d.node.ageSeconds ?? '?'}s ago.</div>
@@ -1558,8 +1855,10 @@ function render(d) {
     ? `<section class="group"><h2 class="group-heading"><span class="ico" aria-hidden="true">${icon}</span>${esc(title)}</h2><div class="group-grid">${items.join('')}</div></section>`
     : ''
 
+  if (softwareCard) groups.performance.splice(groups.performance.length ? 1 : 0, 0, softwareCard)
   $('grid').innerHTML = bannerHtml
     + `<div class="kpi-row">${kpiRow(d)}</div>`
+    + groupSection('🏁', 'Standings & race', [...groups.race, raceCard(SELF_ADDR(d))])
     + groupSection('⚡', 'Producer performance', groups.performance)
     + groupSection('📶', 'Network health', groups.network)
     + groupSection('🔥', 'Production performance', groups.production)

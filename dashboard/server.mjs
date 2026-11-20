@@ -161,6 +161,17 @@ const ELIGIBILITY_IGNORED = (process.env.DASH_ELIGIBILITY_IGNORE ?? '')
   .split(',').map((x) => x.trim()).filter(Boolean)
 const ignoredKeys = new Set(ELIGIBILITY_IGNORED.length ? ELIGIBILITY_IGNORED : (IGNORED_BY_NETWORK[NETWORK] ?? []))
 
+// The node's complaint is its own opinion; the chain is the record. On Mainnet
+// since 2026-10-06 the Pi has logged "Producer … has insufficient stake" about
+// itself a dozen times an hour while landing about one block in five, and this
+// page and the alerter called that "Producer cannot produce". A per-network
+// ignore list cannot fix that — it would also hide the day enforcement starts.
+// So a complaint counts only when the chain does not contradict it: a block
+// signed by this node within the last N chain blocks (default 90, the alerter's
+// own stall threshold) means it can produce, whatever it says. No chain reading
+// means no contradiction, and the complaint counts.
+const ELIGIBILITY_CHAIN_BLOCKS = envNum('DASH_ELIGIBILITY_CHAIN_BLOCKS', 90)
+
 // XL1 balances are keyed by bare lowercase hex — a 0x prefix is rejected by the
 // gateway, and the env examples ship the 0x form, so normalize every address.
 const bareHex = (a) => (a ?? '').trim().replace(/^0x/i, '').toLowerCase()
@@ -181,6 +192,459 @@ function formatXl1(atto, decimals = 4) {
   const frac = (v % ATTO).toString().padStart(18, '0').slice(0, decimals)
   const grouped = whole.toString().replaceAll(/\B(?=(\d{3})+(?!\d))/g, ',')
   return `${neg ? '-' : ''}${grouped}${decimals > 0 ? `.${frac}` : ''}`
+}
+
+/** AttoXL1 → exact decimal XL1, trailing zeros dropped ("47.5", "0.0001216"). */
+function exactXl1(atto) {
+  if (atto === undefined || atto === null) return undefined
+  const v = BigInt(atto)
+  const frac = (v % ATTO).toString().padStart(18, '0').replace(/0+$/, '')
+  return `${v / ATTO}${frac ? `.${frac}` : ''}`
+}
+
+// -------------------------------------------------------------------- rewards
+//
+// The XL1 block reward, from xl1-cli 5.6.2's own protocol constants
+// (xl1-protocol protocol-model XL1_REWARDS_*, xl1-sdk rewardFromBlockNumber):
+// 500 XL1 for blocks 1..999,999, multiplied by 95/100 every 1,000,000 blocks,
+// never below 10 XL1; the block producer is paid a fixed 10% share by a
+// transfer from the zero address that is recorded IN the block (the rest goes
+// to the step-reward address). Checked on Mainnet: #999,999 paid 500 in total,
+// #1,000,000 (2026-05-19T15:10:34Z) paid 475, #1,758,531 paid its producer 47.5.
+// Sequence's early history followed other rules -- 50,000 per block, then
+// 1,000 at a 5% share, then 500 at 5%, and 500 at 10% only from about block
+// 577,263 -- so what a block recorded always wins over this formula, and the
+// formula alone is only ever reported as an estimate.
+const REWARD_STARTING = 500n * ATTO
+const REWARD_BLOCKS_PER_STEP = 1_000_000
+const REWARD_STEP_NUM = 95n
+const REWARD_STEP_DEN = 100n
+const REWARD_MIN = 10n * ATTO
+const PRODUCER_SHARE_NUM = 10n
+const PRODUCER_SHARE_DEN = 100n
+const ZERO_ADDRESS = '0'.repeat(40)
+
+/** Total block reward the protocol schedule allows at height n (atto). */
+function protocolBlockReward(n) {
+  if (!Number.isInteger(n) || n < 1) return undefined
+  const step = Math.floor((n + REWARD_BLOCKS_PER_STEP) / REWARD_BLOCKS_PER_STEP)
+  const e = BigInt(step - 1)
+  const r = REWARD_STARTING * REWARD_STEP_NUM ** e / REWARD_STEP_DEN ** e
+  return r < REWARD_MIN ? REWARD_MIN : r
+}
+/** The producer's share of protocolBlockReward(n) (atto). */
+function protocolProducerReward(n) {
+  const r = protocolBlockReward(n)
+  return r === undefined ? undefined : r * PRODUCER_SHARE_NUM / PRODUCER_SHARE_DEN
+}
+
+// Verified eras, for blocks counted before the ledger below existed. A range is
+// reconstructed only when it lies entirely inside one era; otherwise it stays
+// unknown rather than being priced at one era's rate.
+const REWARD_ERAS = {
+  mainnet: (from, to) => {
+    const a = protocolProducerReward(from)
+    return a !== undefined && a === protocolProducerReward(to) ? a : undefined
+  },
+  // From the chain's own records (sampled 2026-10-10): 500 XL1 at a 10% share
+  // from block 577,263; earlier blocks paid 25 or less to their producer.
+  sequence: (from, to) => (from >= 577_263 && to < REWARD_BLOCKS_PER_STEP ? 50n * ATTO : undefined),
+}
+
+const bare = (a) => String(a ?? '').replace(/^0x/i, '').toLowerCase()
+/** Wrap an async task so a call made while the previous one is still running is
+ *  dropped, not queued: the next interval tick picks up where it left off. */
+function singleFlight(fn) {
+  let busy = false
+  return async (...args) => {
+    if (busy) return
+    busy = true
+    try { return await fn(...args) } finally { busy = false }
+  }
+}
+
+/** What a block recorded for `recipient`: its share of the zero-address reward
+ *  transfer, that transfer's total, and fees other addresses paid it. */
+function recordedRewards(payloads, recipient) {
+  const out = { reward: undefined, total: undefined, fees: 0n }
+  if (!Array.isArray(payloads) || !recipient) return out
+  for (const p of payloads) {
+    if (p?.schema !== 'network.xyo.transfer' || !p.transfers || typeof p.transfers !== 'object') continue
+    const from = bare(p.from)
+    for (const [to, hex] of Object.entries(p.transfers)) {
+      let v
+      try { v = BigInt(`0x${bare(hex)}`) } catch { continue }
+      if (from === ZERO_ADDRESS) {
+        out.total = (out.total ?? 0n) + v
+        if (bare(to) === recipient) out.reward = (out.reward ?? 0n) + v
+      } else if (bare(to) === recipient && from !== recipient) {
+        out.fees += v
+      }
+    }
+  }
+  return out
+}
+
+// The protocol's step-reward pool (xl1-protocol XYO_STEP_REWARD_ADDRESS). A
+// block's producer reward is every zero-address transfer except this share --
+// the same attribution the official explorer uses, and it follows the reward to
+// whatever reward address the producer configured.
+const STEP_REWARD_ADDRESS = '1216197612161976121619761216197612161976'
+
+/** Producer reward a block attributes to its signer (atto), or undefined when
+ *  the block carries no zero-address reward transfer at all. */
+function attributedReward(payloads) {
+  if (!Array.isArray(payloads)) return undefined
+  let amount
+  for (const p of payloads) {
+    if (p?.schema !== 'network.xyo.transfer' || bare(p.from) !== ZERO_ADDRESS || !p.transfers || typeof p.transfers !== 'object') continue
+    for (const [to, hex] of Object.entries(p.transfers)) {
+      if (bare(to) === STEP_REWARD_ADDRESS) continue
+      try { amount = (amount ?? 0n) + BigInt(`0x${bare(hex)}`) } catch { /* not a number: ignored */ }
+    }
+  }
+  return amount
+}
+
+// Our block rewards, one block at a time, as the production scan finds them.
+// Amounts are atto-XL1 BigInts; persisted as strings with the scan cursor so a
+// restart neither loses nor double-counts a block.
+const ledger = {
+  since: undefined, // first block the ledger accounted
+  through: undefined, // highest block accounted (persisted)
+  preLedgerBlocks: undefined, // our blocks counted before the ledger existed
+  preLedgerFrom: undefined,
+  recorded: 0n, recordedBlocks: 0,
+  estimated: 0n, estimatedBlocks: 0,
+  unknownBlocks: 0,
+  fees: 0n,
+  last: undefined, // { n, reward, total } of our latest recorded block
+}
+
+/** Account one of our blocks. Returns how it was classified. */
+function accountBlock(n, payloads, { recipient = REWARD_ADDRESS || PRODUCER_ADDRESS, net = NETWORK } = {}) {
+  if (!Number.isInteger(n) || (ledger.through !== undefined && n <= ledger.through)) return 'duplicate'
+  ledger.since ??= n
+  const rec = recordedRewards(payloads, recipient)
+  ledger.fees += rec.fees
+  if (rec.reward !== undefined) {
+    ledger.recorded += rec.reward
+    ledger.recordedBlocks += 1
+    if (!ledger.last || n > ledger.last.n) ledger.last = { n, reward: rec.reward, total: rec.total }
+    return 'recorded'
+  }
+  // No recorded transfer to us in a block we signed: payloads missing, or the
+  // reward went elsewhere. Mainnet follows the protocol schedule exactly, so it
+  // is estimated and labelled; Sequence's history did not, so it stays unknown.
+  const est = net === 'mainnet' ? protocolProducerReward(n) : undefined
+  if (est !== undefined) { ledger.estimated += est; ledger.estimatedBlocks += 1; return 'estimated' }
+  ledger.unknownBlocks += 1
+  return 'unknown'
+}
+
+function ledgerDoc() {
+  return {
+    since: ledger.since, through: ledger.through,
+    preLedgerBlocks: ledger.preLedgerBlocks, preLedgerFrom: ledger.preLedgerFrom,
+    recorded: ledger.recorded.toString(), recordedBlocks: ledger.recordedBlocks,
+    estimated: ledger.estimated.toString(), estimatedBlocks: ledger.estimatedBlocks,
+    unknownBlocks: ledger.unknownBlocks, fees: ledger.fees.toString(),
+    last: ledger.last && { n: ledger.last.n, reward: ledger.last.reward.toString(), total: ledger.last.total?.toString() },
+  }
+}
+function restoreLedger(doc) {
+  if (!doc || typeof doc !== 'object') return
+  const big = (x) => { try { return BigInt(x ?? 0) } catch { return 0n } }
+  const int = (x) => (Number.isFinite(Number(x)) ? Number(x) : undefined)
+  Object.assign(ledger, {
+    since: int(doc.since), through: int(doc.through),
+    preLedgerBlocks: int(doc.preLedgerBlocks), preLedgerFrom: int(doc.preLedgerFrom),
+    recorded: big(doc.recorded), recordedBlocks: int(doc.recordedBlocks) ?? 0,
+    estimated: big(doc.estimated), estimatedBlocks: int(doc.estimatedBlocks) ?? 0,
+    unknownBlocks: int(doc.unknownBlocks) ?? 0, fees: big(doc.fees),
+    last: doc.last && Number.isFinite(Number(doc.last.n)) ? { n: Number(doc.last.n), reward: big(doc.last.reward), total: doc.last.total !== undefined ? big(doc.last.total) : undefined } : undefined,
+  })
+}
+
+// ------------------------------------------------------------------ history
+//
+// Lifetime coverage: a bounded walk from just below the live scan's starting
+// point down to block 1, so blocks and rewards from before this dashboard
+// began scanning come from the chain's own records too. Ranges never overlap:
+//   n <  scannedFrom          -> counts (all signers) + rewards  ("pre-scan")
+//   scannedFrom <= n < attrSince -> rewards only; those blocks are already in
+//                                   the live counts                ("in-scan")
+//   our own rewards for n >= ledgerSince stay with the 2.3.3 ledger.
+// A batch only advances the checkpoint when the gateway returned every block
+// number in it; anything less is retried, never skipped.
+const HISTORY_FILE = envStr('DASH_HISTORY_FILE', '/var/lib/xl1/dashboard/chainHistory.json')
+const HISTORY_BATCHES = envNum('DASH_HISTORY_BATCHES', 2, 1) // per chain poll, 200 blocks each
+const HISTORY_BATCH = 200
+const chainHistory = {
+  scannedFrom: undefined, ledgerSince: undefined, attrSince: undefined,
+  cursor: undefined, // next (highest) block still to read; history covers (cursor, attrSince)
+  done: false, error: undefined,
+  counts: new Map(), // signer -> pre-scan blocks
+  attributed: new Map(), // signer -> producer reward attributed, n < attrSince (atto)
+  self: { preScan: { blocks: 0, recorded: 0n, recordedBlocks: 0, missing: 0, fees: 0n }, inScan: { blocks: 0, recorded: 0n, recordedBlocks: 0, missing: 0, fees: 0n }, first: undefined },
+  lastWrite: 0,
+}
+// Live per-signer attribution, from attrSince upward (persisted in peers.json).
+const liveAttributed = new Map()
+
+/** Account one historical block. Pure apart from `history`; exported for tests. */
+function historyBlock(n, signer, payloads, { self = PRODUCER_ADDRESS || REWARD_ADDRESS, recipient = REWARD_ADDRESS || PRODUCER_ADDRESS } = {}) {
+  const h = chainHistory
+  if (!(n < h.attrSince)) return 'out-of-range'
+  const attr = attributedReward(payloads)
+  if (n < h.scannedFrom) h.counts.set(signer, (h.counts.get(signer) ?? 0) + 1)
+  if (attr !== undefined) h.attributed.set(signer, (h.attributed.get(signer) ?? 0n) + attr)
+  if (self && signer === self && n < h.ledgerSince) {
+    const b = n < h.scannedFrom ? h.self.preScan : h.self.inScan
+    b.blocks += 1
+    const rec = recordedRewards(payloads, recipient)
+    b.fees += rec.fees
+    if (rec.reward !== undefined) { b.recorded += rec.reward; b.recordedBlocks += 1 } else b.missing += 1
+    if (h.self.first === undefined || n < h.self.first) h.self.first = n
+  }
+  return n < h.scannedFrom ? 'pre-scan' : 'in-scan'
+}
+
+/** One bounded step of the history walk. Runs after the live scan, only when it
+ *  is caught up, and never more than HISTORY_BATCHES batches per chain poll.
+ *
+ *  Single-flight: two steps reading the same cursor across the gateway await
+ *  would both count the batch. In production that happened whenever a chain
+ *  poll outlasted its 15 s interval (2.3.4: +101 own blocks on Mainnet, +53 on
+ *  Sequence, against an independent count of the block files). */
+let historyBusy = false
+async function backfillHistory(viewer, currentNum) {
+  if (historyBusy) return
+  historyBusy = true
+  try { await historyStep(viewer, currentNum) } finally { historyBusy = false }
+}
+async function historyStep(viewer, currentNum) {
+  const h = chainHistory
+  if (h.done || h.cursor === undefined || h.attrSince === undefined) return
+  if (production.error || (production.cursor !== undefined && currentNum - production.cursor > 5)) return
+  for (let b = 0; b < HISTORY_BATCHES && h.cursor >= 1; b++) {
+    const to = h.cursor
+    // A partial answer is retried with a smaller batch, never skipped. The
+    // gateway truncates some ranges at full size and answers them completely
+    // in smaller pieces (2026-10-11: blocksByNumber(204002, 200) returned the
+    // newest 47 every time; 50 at a time returned all of them).
+    let size = HISTORY_BATCH, from, limit, inRange
+    for (;;) {
+      from = Math.max(1, to - size + 1); limit = to - from + 1
+      let blocks
+      try { blocks = await viewer.block.blocksByNumber(to, limit) } catch (error) { h.error = error.message?.slice(0, 160); return }
+      // Belt and braces: if anything moved the checkpoint while we waited, this
+      // batch is no longer ours to count.
+      if (h.cursor !== to) return
+      inRange = new Map()
+      for (const entry of blocks ?? []) {
+        const bw = Array.isArray(entry) ? entry[0] : entry
+        const n = Number(bw?.block)
+        if (Number.isInteger(n) && n >= from && n <= to) inRange.set(n, entry)
+      }
+      if (inRange.size === limit) break
+      if (size <= HISTORY_MIN_BATCH) { h.error = `gateway returned ${inRange.size} of ${limit} blocks for ${from}-${to}, even at the smallest batch; will retry`; return }
+      size = Math.max(HISTORY_MIN_BATCH, Math.ceil(size / 2))
+    }
+    for (const [n, entry] of inRange) {
+      const bw = Array.isArray(entry) ? entry[0] : entry
+      const signer = bare((bw?.addresses ?? [])[0])
+      if (!signer) continue
+      historyBlock(n, signer, Array.isArray(entry) ? entry[1] : undefined)
+    }
+    h.cursor = from - 1
+    h.error = undefined
+    if (h.cursor < 1) h.done = true
+  }
+  await persistHistory()
+}
+
+const HISTORY_FORMAT = 2
+const HISTORY_MIN_BATCH = 10
+function historyDoc() {
+  const h = chainHistory
+  return {
+    v: HISTORY_FORMAT, updatedAt: new Date().toISOString(),
+    scannedFrom: h.scannedFrom, ledgerSince: h.ledgerSince, attrSince: h.attrSince,
+    cursor: h.cursor, done: h.done,
+    counts: Object.fromEntries(h.counts),
+    attributed: Object.fromEntries([...h.attributed].map(([k, v]) => [k, v.toString()])),
+    self: { first: h.self.first, ...Object.fromEntries(['preScan', 'inScan'].map((k) => [k, { ...h.self[k], recorded: h.self[k].recorded.toString(), fees: h.self[k].fees.toString() }])) },
+  }
+}
+async function persistHistory(force = false) {
+  if (chainHistory.cursor === undefined) return
+  if (!force && !chainHistory.done && Date.now() - chainHistory.lastWrite < 60_000) return
+  try {
+    await writeFile(`${HISTORY_FILE}.tmp`, JSON.stringify(historyDoc()))
+    await rename(`${HISTORY_FILE}.tmp`, HISTORY_FILE)
+    chainHistory.lastWrite = Date.now()
+  } catch (error) { chainHistory.error = `could not save history: ${error.message?.slice(0, 120)}` }
+}
+function restoreHistory(doc) {
+  // An older format is discarded, not migrated: v1 files (2.3.4) may hold batches
+  // counted twice, and the walk restarts from the same hand-over point.
+  if (!doc || doc.v !== HISTORY_FORMAT) return false
+  const big = (x) => { try { return BigInt(x ?? 0) } catch { return 0n } }
+  const int = (x) => (Number.isFinite(Number(x)) ? Number(x) : undefined)
+  Object.assign(chainHistory, {
+    scannedFrom: int(doc.scannedFrom), ledgerSince: int(doc.ledgerSince), attrSince: int(doc.attrSince),
+    cursor: int(doc.cursor), done: Boolean(doc.done), error: undefined,
+    counts: new Map(Object.entries(doc.counts ?? {}).map(([k, v]) => [k, Number(v) || 0])),
+    attributed: new Map(Object.entries(doc.attributed ?? {}).map(([k, v]) => [k, big(v)])),
+    self: {
+      first: int(doc.self?.first),
+      ...Object.fromEntries(['preScan', 'inScan'].map((k) => {
+        const d = doc.self?.[k] ?? {}
+        return [k, { blocks: int(d.blocks) ?? 0, recorded: big(d.recorded), recordedBlocks: int(d.recordedBlocks) ?? 0, missing: int(d.missing) ?? 0, fees: big(d.fees) }]
+      })),
+    },
+  })
+  return true
+}
+async function loadHistory() {
+  try { restoreHistory(JSON.parse(await readFile(HISTORY_FILE, 'utf8'))) } catch { /* first run: initialised by initHistory */ }
+}
+/** Fix the history's boundaries once, from the live scan and the ledger. */
+function initHistory() {
+  const h = chainHistory
+  if (h.attrSince !== undefined) return
+  if (production.scannedFrom === undefined || ledger.since === undefined || production.cursor === undefined) return
+  h.scannedFrom = production.scannedFrom
+  h.ledgerSince = ledger.since
+  // Live attribution starts with the next scanned block -- unless it already
+  // started (history file lost, peers file kept): then reuse that point, or the
+  // blocks between the two would be attributed twice.
+  h.attrSince = production.attrSince ?? production.cursor + 1
+  production.attrSince = h.attrSince
+  h.cursor = h.attrSince - 1
+}
+
+/** The rewards section of the API: what was recorded, what is estimated or
+ *  reconstructed (and on what basis), and what is unknown -- never one number
+ *  pretending to be all three. */
+/** Own blocks the live counter holds twice, as established by the chain.
+ *  Before 2.3.5 two overlapping polls could count one block twice in the live
+ *  scan (Sequence: 10,683 counted where the block files hold 10,681). Once the
+ *  history walk has read the whole scanned range, the difference between what
+ *  the live scan counted there and what the chain shows is known exactly, and
+ *  it is what the all-time total subtracts. Never negative: a live count below
+ *  the chain would be blocks missed, not duplicates, and is not "corrected".
+ *  The stored counter and the trend it feeds are left as they are -- nothing
+ *  persisted is rewritten, and the trend's deltas stay continuous. */
+function selfOvercount() {
+  const h = chainHistory
+  const covered = h.attrSince !== undefined && h.cursor !== undefined && h.scannedFrom !== undefined && h.cursor < h.scannedFrom
+  if (!covered || ledger.preLedgerBlocks === undefined) return 0
+  const d = ledger.preLedgerBlocks - h.self.inScan.blocks
+  return d > 0 ? d : 0
+}
+
+function rewardsView(currentBlock = state.chain?.currentBlock, net = NETWORK) {
+  const x = (atto) => exactXl1(atto)
+  const view = { network: net, recipient: REWARD_ADDRESS || PRODUCER_ADDRESS || undefined }
+  if (ledger.last) {
+    view.perBlock = { xl1: x(ledger.last.reward), source: 'recorded', block: ledger.last.n, ofTotalXl1: x(ledger.last.total) }
+  } else if (net === 'mainnet' && Number.isInteger(currentBlock)) {
+    view.perBlock = { xl1: x(protocolProducerReward(currentBlock)), source: 'protocol-schedule' }
+  }
+  if (Number.isInteger(currentBlock) && currentBlock > 0) {
+    const at = (Math.floor(currentBlock / REWARD_BLOCKS_PER_STEP) + 1) * REWARD_BLOCKS_PER_STEP
+    const now = protocolProducerReward(currentBlock), next = protocolProducerReward(at)
+    if (next !== now) {
+      view.nextStep = {
+        atBlock: at, blocksAway: at - currentBlock, xl1: x(next),
+        basis: net === 'mainnet' ? 'protocol schedule (xl1-cli 5.6.2)' : 'protocol schedule (xl1-cli 5.6.2); Sequence history has not always followed it',
+      }
+    }
+  }
+  view.recorded = { xl1: x(ledger.recorded), blocks: ledger.recordedBlocks, since: ledger.since }
+  if (ledger.estimatedBlocks) view.estimated = { xl1: x(ledger.estimated), blocks: ledger.estimatedBlocks, basis: 'protocol schedule' }
+  if (ledger.unknownBlocks) view.unknownBlocks = ledger.unknownBlocks
+  view.fees = { xl1: x(ledger.fees) }
+  let reconstructed = 0n
+  // Once the history walk has passed below the scan's starting block, every
+  // pre-ledger block in the scan range has its reward read from the chain, and
+  // that replaces the reconstruction.
+  const h = chainHistory
+  const inScanCovered = h.attrSince !== undefined && h.cursor !== undefined && h.cursor < h.scannedFrom
+  if (inScanCovered) {
+    const s = h.self.inScan
+    view.inScanRecorded = { xl1: x(s.recorded), blocks: s.recordedBlocks, missing: s.missing, feesXl1: x(s.fees), from: h.scannedFrom, to: h.ledgerSince - 1 }
+    if (ledger.preLedgerBlocks !== undefined && s.blocks !== ledger.preLedgerBlocks) {
+      view.inScanRecorded.discrepancy = `history found ${s.blocks} own blocks where the live scan counted ${ledger.preLedgerBlocks}`
+    }
+  } else if (ledger.preLedgerBlocks) {
+    const from = ledger.preLedgerFrom, to = (ledger.since ?? currentBlock ?? 0) - 1
+    const per = Number.isInteger(from) && to >= from ? REWARD_ERAS[net]?.(from, to) : undefined
+    if (per !== undefined) {
+      reconstructed = per * BigInt(ledger.preLedgerBlocks)
+      view.reconstructed = { xl1: x(reconstructed), blocks: ledger.preLedgerBlocks, from, to, perBlockXl1: x(per), basis: 'one verified reward era covers the whole range' }
+    } else {
+      view.reconstructed = { blocks: ledger.preLedgerBlocks, from, to, xl1: undefined, basis: 'unknown: range is not inside one verified era' }
+    }
+  }
+  const inScanRec = inScanCovered ? h.self.inScan.recorded : 0n
+  const recordedSinceScan = ledger.recorded + inScanRec
+  const total = recordedSinceScan + ledger.estimated + reconstructed
+  view.earned = {
+    xl1: x(total), scope: 'since scanning began',
+    from: h.scannedFrom ?? ledger.preLedgerFrom ?? ledger.since,
+    recordedShare: total > 0n ? Number(recordedSinceScan * 10000n / total) / 100 : undefined,
+  }
+
+  // History coverage: how much of the chain below the scan has been read.
+  const selfAddr = PRODUCER_ADDRESS || REWARD_ADDRESS
+  if (h.attrSince !== undefined && h.cursor !== undefined) {
+    const top = h.attrSince - 1
+    const pre = h.self.preScan
+    view.history = {
+      coverage: h.done ? 'complete' : 'partial',
+      coveredDownTo: h.cursor + 1, to: top,
+      percent: top > 0 ? Number((((top - h.cursor) / top) * 100).toFixed(2)) : 100,
+      error: h.error,
+      preScan: { blocks: pre.blocks, recordedXl1: x(pre.recorded), recordedBlocks: pre.recordedBlocks, missing: pre.missing, feesXl1: x(pre.fees) },
+    }
+  }
+  // Lifetime is claimed only when the history reaches block 1: until then a
+  // "lifetime" total would be a partial one with a confident label.
+  if (h.done) {
+    const pre = h.self.preScan
+    const ownFirst = h.self.first ?? ledger.since
+    const lifetimeRecorded = recordedSinceScan + pre.recorded
+    // Blocks from the chain-read buckets only -- before the scan, inside it, and
+    // the ledger since -- which are disjoint and duplicate-guarded. The live
+    // counter is kept beside it: before 2.3.5 overlapping polls could count a
+    // block twice there (Sequence: +2 against an independent block-file count).
+    const chainReadBlocks = pre.blocks + h.self.inScan.blocks + ledger.recordedBlocks + ledger.estimatedBlocks + ledger.unknownBlocks
+    view.lifetime = {
+      blocks: chainReadBlocks,
+      liveCounterBlocks: pre.blocks + (peers.get(selfAddr) ?? 0),
+      earnedXl1: x(total + pre.recorded),
+      recordedXl1: x(lifetimeRecorded),
+      feesXl1: x(ledger.fees + h.self.inScan.fees + pre.fees),
+      unrecordedBlocks: pre.missing + (inScanCovered ? h.self.inScan.missing : 0) + ledger.estimatedBlocks + ledger.unknownBlocks,
+      firstBlock: ownFirst,
+      basis: 'chain records from block 1',
+      // Independent method: every block this node signed, attributed from the
+      // protocol reward transfers (as the explorer does). Should equal recorded.
+      attributedXl1: x((h.attributed.get(selfAddr) ?? 0n) + (liveAttributed.get(selfAddr) ?? 0n)),
+    }
+    // Lifetime standings for reconciliation: blocks and attributed rewards for
+    // every signer, from block 1 to now.
+    const signers = new Set([...h.counts.keys(), ...peers.keys()])
+    view.lifetimeSigners = [...signers].map((a) => ({
+      address: a,
+      blocks: (h.counts.get(a) ?? 0) + (peers.get(a) ?? 0),
+      attributedXl1: x((h.attributed.get(a) ?? 0n) + (liveAttributed.get(a) ?? 0n)),
+    })).sort((p, q) => q.blocks - p.blocks).slice(0, 20)
+  }
+  return view
 }
 
 // ---------------------------------------------------------------- chain source
@@ -964,6 +1428,21 @@ async function loadPeers() {
     production.scannedFrom = doc.scannedFrom
     production.scannedTo = doc.scannedTo
     production.scanned = Number(doc.scanned) || 0
+    restoreLedger(doc.ledger)
+    if (doc.attribution && Number.isFinite(Number(doc.attribution.since))) {
+      production.attrSince = Number(doc.attribution.since)
+      for (const [k, v] of Object.entries(doc.attribution.bySigner ?? {})) { try { liveAttributed.set(k, BigInt(v)) } catch { /* skip */ } }
+    }
+    // The last block this node landed, from the persisted recent strip. Without
+    // it a restarted dashboard knows the head but not our last block until the
+    // scan next finds one -- and for that minute "no block of ours seen" was
+    // read as "never produced" and paged (2026-10-10, 2.3.2 rollout).
+    const ownRecent = (Array.isArray(doc.recent) ? doc.recent : []).filter((r) => r?.mine && Number.isFinite(Number(r.n)))
+    if (ownRecent.length && production.lastBlock === undefined) {
+      const last = ownRecent.reduce((a, b) => (Number(b.n) > Number(a.n) ? b : a))
+      production.lastBlock = Number(last.n)
+      if (Number.isFinite(Number(last.t))) production.lastBlockAt = Number(last.t)
+    }
     peersEvicted.addresses = Number(doc.evicted?.addresses) || 0
     peersEvicted.blocks = Number(doc.evicted?.blocks) || 0
     production.multiSigner = Boolean(doc.multiSigner)
@@ -1050,6 +1529,10 @@ async function persistPeers(force = false) {
     // Rebuilding it from the scan alone would take an hour of chain to refill,
     // during which the strip would understate this node for no reason.
     recent: production.recent.slice(-RECENT_BLOCKS),
+    // Reward ledger, written with the cursor it was counted against.
+    ledger: ledgerDoc(),
+    // Live per-signer reward attribution and the block it starts at.
+    attribution: { since: production.attrSince, bySigner: Object.fromEntries([...liveAttributed].map(([k, v]) => [k, v.toString()])) },
     days: Object.fromEntries([...days.entries()].sort().map(([key, day]) => [key, {
       scanned: day.scanned,
       counts: Object.fromEntries([...day.counts.entries()].sort((a, b) => b[1] - a[1])),
@@ -1131,6 +1614,15 @@ async function scanProduction(viewer, currentNum) {
   if (from > currentNum) return
 
   production.scannedFrom ??= from
+  // The reward ledger starts with the first block this build scans. Blocks the
+  // scan counted before it existed are remembered as a count and range, and
+  // priced only if one verified reward era covers them (rewardsView).
+  if (ledger.preLedgerBlocks === undefined) {
+    const before = production.scannedFrom < from
+    ledger.preLedgerBlocks = before ? (peers.get(self) ?? 0) : 0
+    ledger.preLedgerFrom = before ? production.scannedFrom : undefined
+    ledger.since ??= from
+  }
   peersSince ??= new Date().toISOString()
   let budget = PEERS_CATCHUP
 
@@ -1171,6 +1663,13 @@ async function scanProduction(viewer, currentNum) {
 
         production.scanned += 1
         for (const addr of signers) peers.set(addr, (peers.get(addr) ?? 0) + 1)
+        // Per-signer producer reward, from attrSince upward (the history walk
+        // covers everything below it), so lifetime rewards never overlap.
+        if (production.attrSince !== undefined && n >= production.attrSince) {
+          const attr = attributedReward(Array.isArray(entry) ? entry[1] : undefined)
+          const signer = [...signers][0]
+          if (attr !== undefined) liveAttributed.set(signer, (liveAttributed.get(signer) ?? 0n) + attr)
+        }
 
         // A block with no timestamp in either place is counted in the totals and
         // left out of every day window rather than filed under an invented
@@ -1192,6 +1691,8 @@ async function scanProduction(viewer, currentNum) {
         // of "produced", so the headline and the table can never disagree.
         if (self && signers.has(self)) {
           production.counted += 1
+          // Rewards from the block's own transfer, off payloads already in hand.
+          accountBlock(n, Array.isArray(entry) ? entry[1] : undefined)
           if (production.lastBlock === undefined || n > production.lastBlock) {
             production.lastBlock = n
             production.lastBlockAt = Number.isFinite(epoch) && epoch > 0 ? epoch : undefined
@@ -1213,6 +1714,7 @@ async function scanProduction(viewer, currentNum) {
 
       production.cursor = top
       production.scannedTo = top
+      ledger.through = Math.max(ledger.through ?? -1, top)
       from = top + 1
       budget -= limit
       if (!production.error) production.error = undefined
@@ -1338,7 +1840,12 @@ function peerBoard() {
     }
   }
 
-  const rows = rank(peers, scanned)
+  // The all-time standings use the chain-verified own count (see selfOvercount);
+  // day windows cannot be corrected the same way, since which day held the
+  // duplicate is not known, and are left as counted.
+  const over = self ? selfOvercount() : 0
+  const allTime = over > 0 && peers.has(self) ? new Map([...peers, [self, Math.max(0, peers.get(self) - over)]]) : peers
+  const rows = rank(allTime, scanned)
   const mine = rows.find((r) => r.isSelf)
 
   return {
@@ -1441,6 +1948,9 @@ async function pollChain() {
 
     await scanProduction(viewer, currentNum)
     await backfillDays(viewer)
+    // Lifetime history: last, bounded, and only when the live scan is caught up.
+    initHistory()
+    await backfillHistory(viewer, currentNum)
 
     sample('height', currentNum)
     sample('blocks', production.counted)
@@ -1910,6 +2420,78 @@ function priceView() {
   }
 }
 
+// ------------------------------------------------------------- time payload
+//
+// Before every candidate the producer asks Ethereum for its latest block and
+// waits for the answer. On 2026-10-22 the image's default endpoint hung for
+// 15-140 s at a time for about an hour and a half; every candidate built after
+// such a wait arrived too late, and nothing on this page moved -- the node was
+// up, healthy and building. Read from the per-height rows the collector already
+// writes, so it costs no request of its own.
+const SLOW_PAYLOAD_MS = 3_000
+const PAYLOAD_WINDOW_MS = 3_600_000
+// One slow payload in five over an hour, and only with enough builds behind it:
+// one 4 s payload out of three builds is noise, twelve out of sixty is not.
+const PAYLOAD_ALERT_SHARE = 0.2
+const PAYLOAD_ALERT_MIN = 20
+
+/** Host only. The URL can carry an API key in its path or query (Alchemy and
+ *  Infura both put it there), so the collector sends the host alone and this
+ *  keeps nothing that is not a plain hostname. No host means the image's own
+ *  default endpoint. */
+function evmEndpoint(evm) {
+  const host = typeof evm?.host === 'string' && /^[a-z0-9.-]{1,253}$/i.test(evm.host) ? evm.host.toLowerCase() : null
+  return { host, configured: Boolean(host) }
+}
+
+/** The last hour of one producer's builds: how long each waited on its time
+ *  payload, and how many candidates were rejected. Rows are the collector's
+ *  [n, buildAt, retries, validationFailures, rejected, timePayloadMs]. */
+function payloadSummary(heights, evm, now = Date.now()) {
+  const rows = Array.isArray(heights?.rows) ? heights.rows.filter(Array.isArray) : []
+  const recent = rows.filter((r) => r[1] !== null && Number.isFinite(Number(r[1])) && now - Number(r[1]) <= PAYLOAD_WINDOW_MS)
+  const tp = recent.map((r) => r[5])
+    .filter((v) => v !== null && v !== undefined && v !== '' && Number.isFinite(Number(v)))
+    .map(Number).sort((a, b) => a - b)
+  const at = (q) => (tp.length ? tp[Math.min(tp.length - 1, Math.floor(tp.length * q))] : undefined)
+  return {
+    windowSeconds: PAYLOAD_WINDOW_MS / 1000,
+    builds: recent.length,
+    measured: tp.length,
+    p50Ms: at(0.5),
+    p90Ms: at(0.9),
+    maxMs: tp.length ? tp[tp.length - 1] : undefined,
+    slow: tp.filter((v) => v > SLOW_PAYLOAD_MS).length,
+    slowOverMs: SLOW_PAYLOAD_MS,
+    rejected: recent.reduce((a, r) => a + (Number(r[4]) || 0), 0),
+    endpoint: evmEndpoint(evm),
+  }
+}
+
+/** Every producer this host's collector reports, or the one this page is about
+ *  when the collector reports only that. `alerts` is what the alerter pages on:
+ *  worded here, once, so both hosts' alerters say the same thing. */
+function timePayloadView(now = Date.now()) {
+  const n = state.node
+  if (!n?.ok) return undefined
+  const local = Array.isArray(n.localProducers) ? n.localProducers.filter((p) => p && typeof p === 'object') : []
+  const producers = local.length
+    ? local.map((p) => ({ id: typeof p.id === 'string' ? p.id : 'unknown', network: p.network, hasRows: Array.isArray(p.heights?.rows), ...payloadSummary(p.heights, p.evmRpc, now) }))
+    : [{ id: 'self', network: NETWORK, hasRows: Array.isArray(n.heights?.rows), ...payloadSummary(n.heights, n.evmRpc, now) }]
+  // A collector too old to write height rows says nothing about payloads, and
+  // a card of zeroes would claim that it did.
+  if (!producers.some((p) => p.hasRows)) return undefined
+  const alerts = producers
+    .filter((p) => p.measured >= PAYLOAD_ALERT_MIN && p.slow / p.measured >= PAYLOAD_ALERT_SHARE)
+    .map((p) => `${p.id === 'self' ? 'this producer' : p.id}: ${p.slow} of ${p.measured} time payloads over ${SLOW_PAYLOAD_MS / 1000} s in the last hour (Ethereum RPC ${p.endpoint.host ?? 'image default'})`)
+  return {
+    producers: producers.map(({ hasRows, ...p }) => p),
+    alerts,
+    alertShare: PAYLOAD_ALERT_SHARE,
+    alertMin: PAYLOAD_ALERT_MIN,
+  }
+}
+
 // -------------------------------------------------------------- fleet source
 //
 // One page for every node you run, instead of one page each.
@@ -1978,6 +2560,9 @@ function fleetSummary(doc) {
     problems: Array.isArray(doc?.problems) ? doc.problems.slice(0, 4) : [],
     version: doc?.build?.version,
     commit: doc?.build?.commit,
+    // Which chain the peer is on. Nodes in one fleet can sit on different
+    // networks, and a block count means nothing without its chain.
+    network: typeof doc?.chain?.network === 'string' ? doc.chain.network : undefined,
     chainBlock: doc?.chain?.currentBlock,
     // Blocks won, on the two windows worth comparing between machines.
     blocks24h: d.blocksByWindow?.day24h,
@@ -1993,7 +2578,43 @@ function fleetSummary(doc) {
     alerterRunning: doc?.alerts?.installed ? Boolean(doc.alerts.running) : undefined,
     uptimeSeconds: doc?.node?.runSeconds,
     cliVersion: doc?.node?.cliVersion,
+    // Every producer behind that dashboard, not only the one its page is about.
+    // The Windows host runs four on two networks and showed here as a single
+    // Sequence node. Standings come from that dashboard's own table, and only
+    // for producers on the chain it scans.
+    localProducers: fleetProducers(doc),
   }
+}
+
+function fleetProducers(doc) {
+  if (!Array.isArray(doc?.node?.localProducers)) return undefined
+  const top = Array.isArray(doc?.peers?.top) ? doc.peers.top : []
+  const payloads = Array.isArray(doc?.timePayload?.producers) ? doc.timePayload.producers : []
+  const chain = typeof doc?.chain?.network === 'string' ? doc.chain.network : undefined
+  return doc.node.localProducers.filter((p) => p && typeof p === 'object').slice(0, 8).map((p) => {
+    const address = typeof p.rewardAddress === 'string' && /^[0-9a-f]{40}$/.test(p.rewardAddress) ? p.rewardAddress : undefined
+    const network = typeof p.network === 'string' ? p.network : undefined
+    const standing = address && network && network === chain ? top.find((r) => r?.address === address) : undefined
+    const tp = payloads.find((x) => x?.id === p.id)
+    const n = (v) => (Number.isFinite(v) ? v : undefined)
+    return {
+      id: typeof p.id === 'string' ? p.id.slice(0, 40) : undefined,
+      network: network?.slice(0, 40),
+      address,
+      running: p.running === true,
+      builds: n(p.builds),
+      rejected: n(p.rejected),
+      blocksTotal: n(standing?.blocks),
+      sharePercent: n(standing?.sharePercent),
+      rank: n(standing?.rank),
+      label: typeof standing?.label === 'string' ? standing.label.slice(0, 40) : undefined,
+      payloadP50Ms: n(tp?.p50Ms) ?? n(p.timePayloadP50Ms),
+      payloadSlow: n(tp?.slow),
+      payloadMeasured: n(tp?.measured),
+      // Re-validated: a peer is another machine's output, relayed onward here.
+      evmHost: evmEndpoint(tp?.endpoint).host ?? undefined,
+    }
+  })
 }
 
 async function pollFleet() {
@@ -2045,6 +2666,7 @@ function fleetView(board) {
     isSelf: true,
     status: overall().status,
     version: BUILD_STAMP.version ?? DASH_VERSION,
+    network: NETWORK,
     chainBlock: state.chain?.currentBlock,
     blocksTotal: board?.self?.blocks,
     sharePercent: board?.self?.sharePercent,
@@ -2057,12 +2679,27 @@ function fleetView(board) {
     cliVersion: state.node?.cliVersion,
   }
 
-  const nodes = [self, ...FLEET.peers.map(({ label }) => fleet.get(label) ?? { label, ok: false, error: 'not polled yet' })]
+  // A peer's producers on this node's chain are ranked from this node's own
+  // table: the peer cannot rank them, it scans a different chain.
+  const ours = (lp) => {
+    if (lp.network !== NETWORK || !lp.address) return lp
+    const r = board?.top?.find((x) => x.address === lp.address)
+    return r ? { ...lp, blocksTotal: r.blocks, sharePercent: r.sharePercent, rank: r.rank, label: r.label ?? lp.label } : lp
+  }
+  const nodes = [self, ...FLEET.peers.map(({ label }) => {
+    const n = fleet.get(label) ?? { label, ok: false, error: 'not polled yet' }
+    return Array.isArray(n.localProducers) ? { ...n, localProducers: n.localProducers.map(ours) } : n
+  })]
 
   // Combined production, over the nodes that could actually be read. Stated
   // with a count of how many contributed, because a total that silently drops
   // an unreachable machine reads as that machine having produced nothing.
-  const counted = nodes.filter((n) => Number.isFinite(n.blocksTotal))
+  //
+  // Only nodes on this node's network are added: a sequence block and a
+  // mainnet block are different chains' blocks, and their sum is no tally of
+  // anything. A peer that does not say its network is not assumed to match.
+  const counted = nodes.filter((n) => Number.isFinite(n.blocksTotal) && n.network === NETWORK)
+  const networks = [...new Set(nodes.map((n) => n.network).filter(Boolean))]
   const combinedBlocks = counted.reduce((a, n) => a + n.blocksTotal, 0)
 
   return {
@@ -2071,6 +2708,8 @@ function fleetView(board) {
     total: nodes.length,
     combinedBlocks: counted.length ? combinedBlocks : undefined,
     combinedFrom: counted.length,
+    combinedNetwork: NETWORK,
+    networks,
     // Shares are only additive when every node read the same blocks. They do
     // not here -- each scans its own window -- so the combined share is offered
     // only when the windows match, and withheld rather than approximated.
@@ -2225,6 +2864,112 @@ async function pollSystem() {
 
 // ------------------------------------------------------------------- assembly
 
+/** Chain blocks since this node last landed one; undefined until both are read. */
+function blocksSinceOwn() {
+  return (state.chain?.currentBlock !== undefined && production.lastBlock !== undefined)
+    ? state.chain.currentBlock - Number(production.lastBlock)
+    : undefined
+}
+
+// Chain evidence older than this is not evidence. Four polls, and never under a
+// minute, so one slow poll does not flip the verdict.
+const CHAIN_FRESH_MS = Math.max(4 * CHAIN_POLL_MS, 60_000)
+// The dashboard's own warm-up: until the first chain poll and scan land, "no
+// evidence" is a fact about this process, not about the producer.
+const ELIGIBILITY_WARMUP_MS = 2 * CHAIN_FRESH_MS
+
+/** What the chain can say about this node's production right now. */
+function chainEvidence(now = Date.now()) {
+  const c = state.chain
+  if (!c?.ok || c.currentBlock === undefined) return { usable: false, why: 'chain data unavailable' }
+  const age = now - Date.parse(c.polledAt ?? 0)
+  if (!(age <= CHAIN_FRESH_MS)) return { usable: false, why: `chain data is ${Math.round(age / 1000)} s old` }
+  if ((production.behind ?? 0) > ELIGIBILITY_CHAIN_BLOCKS) return { usable: false, why: `block scan is ${production.behind} blocks behind` }
+  if (production.lastBlock === undefined) return { usable: true, sinceOwn: undefined }
+  const sinceOwn = c.currentBlock - Number(production.lastBlock)
+  if (!(sinceOwn >= 0)) return { usable: false, why: 'own block reads ahead of the chain head' }
+  return { usable: true, sinceOwn }
+}
+
+/** Classify the node's eligibility complaint against independent evidence.
+ *  Categories, each with its own evidence:
+ *    none          no complaint
+ *    producer-down container not running: the shutdown is the cause
+ *    not-enforced  this network does not enforce the complaint's rule
+ *    unverified    no fresh chain evidence; the self-report stands, labelled
+ *    contradicted  the chain shows a recent block from this node
+ *    not-landing   fresh chain, no block from this node for > N: reported as
+ *                  not landing blocks, the complaint as unconfirmed context --
+ *                  a missing block is not evidence of insufficient stake
+ *    unconfirmed   fresh chain, no block from this node ever seen: the
+ *                  complaint is the only explanation on offer, and counts
+ *  `counts` decides whether it is a fault named after the complaint. */
+function eligibilityVerdict(node = state.node, ev = chainEvidence(), now = Date.now()) {
+  const reason = node?.eligibility?.reason
+  if (!node?.eligibility?.blocked) return { category: 'none', counts: false }
+  if (node.container && node.container.running === false) {
+    return { category: 'producer-down', counts: false, note: 'the producer is not running; its last complaint is not a current fault' }
+  }
+  if (node.eligibilityIgnored) return { category: 'not-enforced', counts: false, note: node.eligibilityNote }
+  if (!ev.usable) {
+    const warming = now - Date.parse(state.startedAt ?? 0) < ELIGIBILITY_WARMUP_MS
+    return {
+      category: 'unverified',
+      counts: !warming,
+      note: warming ? 'dashboard starting: the chain has not been read yet' : `the node's own report; ${ev.why}`,
+      problem: `producer reports ${reason} — unverified: ${ev.why}`,
+    }
+  }
+  if (ev.sinceOwn === undefined) {
+    // "Not located yet" is not "never produced": a node with a production
+    // record, or a dashboard still warming up, has simply not found its latest
+    // block in this process yet.
+    const record = peers.get(PRODUCER_ADDRESS) ?? 0
+    const warming = now - Date.parse(state.startedAt ?? 0) < ELIGIBILITY_WARMUP_MS
+    if (record > 0 || warming) {
+      return {
+        category: 'unverified',
+        counts: false,
+        note: record > 0
+          ? `the node’s own report; this node has ${record} blocks on record, its latest not yet located`
+          : 'dashboard starting: the block scan has not run yet',
+      }
+    }
+    return {
+      category: 'unconfirmed',
+      counts: true,
+      note: 'the node’s own report; no block from this node has been seen on chain',
+      problem: `producer ineligible: ${reason} (the node’s own report; no block from it seen on chain)`,
+    }
+  }
+  const ago = `${ev.sinceOwn} block${ev.sinceOwn === 1 ? '' : 's'}`
+  if (ev.sinceOwn <= ELIGIBILITY_CHAIN_BLOCKS) {
+    return { category: 'contradicted', counts: false, contradicted: true, note: `the chain shows this node produced ${ago} ago` }
+  }
+  return {
+    category: 'not-landing',
+    counts: false,
+    note: `not landing blocks: last one ${ago} ago; the node reports ${reason} (unconfirmed)`,
+    problem: `not landing blocks: ${ago} since this node's last; it reports ${reason} (unconfirmed)`,
+  }
+}
+
+/** The node as served. Anything not counted as a complaint-named fault is
+ *  marked eligibilityIgnored, so the alerter (which reads it) pages only on
+ *  `unconfirmed` and `unverified`, and its message carries the evidence. The
+ *  alerter's own not-producing and producer-down checks cover the rest. */
+function nodeView() {
+  const v = eligibilityVerdict()
+  if (v.category === 'none') return state.node
+  const out = { ...state.node, eligibilityCategory: v.category }
+  if (!v.counts) Object.assign(out, { eligibilityIgnored: true, eligibilityNote: v.note })
+  if (v.contradicted) out.eligibilityContradicted = true
+  if (v.counts && v.note) {
+    out.eligibility = { ...state.node.eligibility, selfReport: state.node.eligibility.reason, reason: `${state.node.eligibility.reason} (${v.note})` }
+  }
+  return out
+}
+
 function overall() {
   const problems = []
   if (!state.health.ok) problems.push('producer health probe failing')
@@ -2257,9 +3002,18 @@ function overall() {
   if (state.chain.ok && state.chain.chainIdMatchesPreset === false) problems.push('chain id differs from preset')
 
   // A node can be up, healthy and unable to produce a single block. Nothing
-  // else on this page distinguishes that from working.
-  if (state.node.ok && state.node.eligibility?.blocked && !state.node.eligibilityIgnored) {
-    problems.push(`producer ineligible: ${state.node.eligibility.reason}`)
+  // else on this page distinguishes that from working — unless the chain shows
+  // it producing, in which case the complaint is shown but is not a fault.
+  if (state.node.ok) {
+    const v = eligibilityVerdict()
+    // Counted complaints, and the not-landing symptom (a fault in itself,
+    // named for what the chain shows rather than for what the node claims).
+    if ((v.counts || v.category === 'not-landing') && v.problem) problems.push(v.problem)
+  }
+  // Chain evidence that stopped refreshing is a fault of its own: everything
+  // computed from it -- share, last block, the verdict above -- is frozen.
+  if (state.chain.ok && state.chain.polledAt && Date.now() - Date.parse(state.chain.polledAt) > CHAIN_FRESH_MS) {
+    problems.push(`chain data stale (${Math.round((Date.now() - Date.parse(state.chain.polledAt)) / 1000)} s)`)
   }
 
   const lag = versionLag(state.node?.cliVersion, state.release?.latest)
@@ -2304,6 +3058,8 @@ function derived(board = peerBoard()) {
     // Extrapolated, and labelled as such on the page: an hour of observation is
     // not a day of earnings, and presenting it as one would be a lie by rounding.
     rewardPerHour: rewardRate !== undefined ? Number(rewardRate.toFixed(4)) : undefined,
+    // Per-block reward and earnings from the chain's own records (see ledger).
+    rewards: rewardsView(),
     // A rate measured over minutes says nothing about a day. 15 minutes is the
     // floor at which the number stops being an artefact of when you looked.
     rewardPerDay: (rewardRate !== undefined && observedSeconds >= 900)
@@ -2627,7 +3383,7 @@ function derived(board = peerBoard()) {
     blocksSinceLast: (state.chain?.currentBlock !== undefined && production.lastBlock !== undefined)
       ? state.chain.currentBlock - Number(production.lastBlock)
       : undefined,
-    producedObserved: production.counted,
+    producedObserved: Math.max(0, production.counted - selfOvercount()),
     producedSince: production.scannedFrom,
     productionError: production.error,
     // Share of the chain's blocks this node signed. The denominator is blocks
@@ -2677,6 +3433,8 @@ const snapshot = () => ({
     }
   })(),
   ...state,
+  node: nodeView(),
+  timePayload: timePayloadView(),
   release: { ...state.release, installed: state.node?.cliVersion, lag: versionLag(state.node?.cliVersion, state.release?.latest) },
   // One board per response. It was being rebuilt three times -- once in the
   // payload and twice inside derived() -- over the same tally, for three
@@ -2720,6 +3478,32 @@ const snapshot = () => ({
 // error message is exactly where a filesystem path or a hostname arrives
 // without anyone deciding it should.
 const PUBLIC_LABEL = envStr('DASH_PUBLIC_LABEL', '')
+
+/** The public projection of rewardsView(): this producer's chain record only. */
+function publicRewards() {
+  const r = rewardsView()
+  const pick = (o, keys) => (o ? Object.fromEntries(keys.filter((k) => o[k] !== undefined).map((k) => [k, o[k]])) : undefined)
+  return {
+    network: r.network,
+    perBlock: r.perBlock,
+    nextStep: r.nextStep && { ...r.nextStep, status: 'projection' },
+    recorded: r.recorded,
+    estimated: r.estimated,
+    unknownBlocks: r.unknownBlocks,
+    reconstructed: r.reconstructed,
+    inScanRecorded: pick(r.inScanRecorded, ['xl1', 'blocks', 'missing', 'feesXl1', 'from', 'to', 'discrepancy']),
+    fees: r.fees,
+    earned: r.earned,
+    history: r.history && pick(r.history, ['coverage', 'coveredDownTo', 'to', 'percent', 'preScan']),
+    lifetime: r.lifetime,
+    // Where anyone can check a figure without trusting this file.
+    evidence: {
+      blockFile: `https://blocks.${r.network}.xyo.space/block/number/{n}.json`,
+      method: 'https://oxyon.io/xl1/about-data/#rewards',
+      note: 'Each figure is read from reward transfers recorded in the blocks; a reward balance is never treated as earnings.',
+    },
+  }
+}
 
 function publicView(board) {
   const dv = derived(board)
@@ -2824,6 +3608,47 @@ function publicView(board) {
       samples: state.node.latency.samples,
     } : undefined,
 
+    // How far this host's clock can be trusted, so its timestamps can be weighed
+    // against another host's. Named fields only.
+    clock: state.node?.clock ? {
+      synced: state.node.clock.synced,
+      source: state.node.clock.source,
+      stratum: state.node.clock.stratum,
+      offsetMs: state.node.clock.offsetMs,
+      offsetAgainst: state.node.clock.offsetAgainst,
+      rootDispersionMs: state.node.clock.rootDispersionMs,
+      pollIntervalSeconds: state.node.clock.pollIntervalSeconds,
+      lastSyncAt: state.node.clock.lastSyncAt,
+      checkedAt: state.node.clock.checkedAt,
+    } : undefined,
+
+    // Every producer on this host, not only the one this page is about: what each
+    // attempted in the last hour, from its own log. Wins come from the chain, not
+    // from here. Named fields only -- never the container name or image.
+    localProducers: Array.isArray(state.node?.localProducers) ? state.node.localProducers.map((p) => ({
+      id: p.id,
+      network: p.network,
+      rewardAddress: p.rewardAddress,
+      running: p.running,
+      restartCount: p.restartCount,
+      startedAt: p.startedAt,
+      windowSeconds: p.windowSeconds,
+      builds: p.builds,
+      retries: p.retries,
+      validationFailures: p.validationFailures,
+      rejected: p.rejected,
+      timePayloadP50Ms: p.timePayloadP50Ms,
+      timePayloadP95Ms: p.timePayloadP95Ms,
+      lastBuildAt: p.lastBuildAt,
+      // Per-height build rows, joined to the chain and the race by oxyon.io.
+      // Only rows of plain numbers (or null) under the agreed columns.
+      heights: Array.isArray(p.heights?.rows) ? {
+        columns: ['n', 'buildAt', 'retries', 'validationFailures', 'rejected', 'timePayloadMs'],
+        rows: p.heights.rows.slice(-360).filter(Array.isArray)
+          .map((r) => r.slice(0, 6).map((v) => (v === null || Number.isFinite(Number(v)) ? (v === null ? null : Number(v)) : null))),
+      } : undefined,
+    })) : undefined,
+
     // Daily production and earnings, from the chain scan. The same rows the
     // Trends card draws.
     trend: { daily: trendDaily(), retainDays: TREND_RETAIN_DAYS },
@@ -2863,6 +3688,13 @@ function publicView(board) {
         hypothetical: pv.hypothetical,
       }
     })(),
+
+    // Rewards, as the chain records them. The same figures as the dashboard's
+    // own reward accounting, minus anything that is not about this producer's
+    // public record: no other producers' totals, no error text. Each figure
+    // keeps its source label (recorded / estimated / reconstructed / unknown),
+    // and "lifetime" appears only once the history walk has reached block 1.
+    rewards: publicRewards(),
 
     // Which build produced this, so a stale page is identifiable as one.
     build: {
@@ -2925,7 +3757,7 @@ const server = createServer(async (req, res) => {
 // Docker daemon, or a Pi. `overall` and `pollNode` in particular encode the
 // contract with xl1-collect.sh, which is where two silent failures have already
 // hidden.
-export { nextReleaseDelay, CLI_RETRY_MS, CLI_CHECK_MS, formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, blockEpoch, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys, networkView, concentration, shareDrift, producerChurn, observeBatch, gapPercentile, chainObs, GAP_EDGES, sumDays, pollAlerts, prunePeers, peersEvicted, PEERS_MAX, fleetView, fleetSummary, pollFleet, fleet, FLEET, publicView, pollPrice, priceView, NO_MARKET, continuity, pollSystem, HOST_PLATFORM }
+export { selfOvercount, attributedReward, historyBlock, backfillHistory, singleFlight, publicRewards, historyDoc, restoreHistory, initHistory, chainHistory, liveAttributed, STEP_REWARD_ADDRESS, protocolBlockReward, protocolProducerReward, recordedRewards, accountBlock, ledger, ledgerDoc, restoreLedger, rewardsView, exactXl1, REWARD_ERAS, eligibilityVerdict, nodeView, blocksSinceOwn, chainEvidence, ELIGIBILITY_CHAIN_BLOCKS, CHAIN_FRESH_MS, ELIGIBILITY_WARMUP_MS, nextReleaseDelay, CLI_RETRY_MS, CLI_CHECK_MS, formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, blockEpoch, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys, networkView, concentration, shareDrift, producerChurn, observeBatch, gapPercentile, chainObs, GAP_EDGES, sumDays, pollAlerts, prunePeers, peersEvicted, PEERS_MAX, fleetView, fleetSummary, fleetProducers, pollFleet, payloadSummary, timePayloadView, evmEndpoint, SLOW_PAYLOAD_MS, PAYLOAD_ALERT_SHARE, PAYLOAD_ALERT_MIN, fleet, FLEET, publicView, pollPrice, priceView, NO_MARKET, continuity, pollSystem, HOST_PLATFORM }
 
 // Only run as a server when executed directly, not when imported by a test.
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
@@ -2946,6 +3778,9 @@ if (isMain) {
   // Before pollChain: the first scan reads the resumed cursor, and starting it
   // from a fresh window instead would re-count every block in the overlap.
   await loadPeers()
+  await loadHistory()
+  // The history and the live attribution must agree on where one hands over.
+  if (chainHistory.attrSince !== undefined && production.attrSince === undefined) production.attrSince = chainHistory.attrSince
   if (peersError) console.warn(`xl1-dashboard: producer standings unavailable — ${peersError}`)
   await Promise.all([pollChain(), pollHealth(), pollNode(), pollSystem(), pollRelease(), pollAlerts(), pollFleet(), pollPrice()])
   if (trendError) console.warn(`xl1-dashboard: long-range history unavailable — ${trendError}`)
@@ -2954,7 +3789,9 @@ if (isMain) {
   // take the process down, so none of these promises may go unwatched.
   const guard = (fn, name) => () => { Promise.resolve(fn()).catch((e) => console.error(`xl1-dashboard: ${name} failed —`, e)) }
 
-  setInterval(guard(pollChain, 'pollChain'), CHAIN_POLL_MS).unref()
+  // Single-flight: a chain poll can outlast its interval (a slow gateway, a
+  // catch-up scan), and two overlapping polls would scan the same blocks twice.
+  setInterval(guard(singleFlight(pollChain), 'pollChain'), CHAIN_POLL_MS).unref()
   // Checked often, written rarely — persistTrend decides for itself whether
   // enough time has passed, so the cadence lives in one place.
   setInterval(guard(persistTrend, 'persistTrend'), 60_000).unref()
@@ -2989,7 +3826,7 @@ if (isMain) {
       // Flush first: a restart is exactly when the last few minutes of tallying
       // would otherwise be dropped, and deploys are frequent enough for that to
       // add up to a visibly wrong record.
-      persistPeers(true).catch(() => {}).finally(() => {
+      Promise.all([persistPeers(true), persistHistory(true)]).catch(() => {}).finally(() => {
         server.close(() => process.exit(0))
       })
       setTimeout(() => process.exit(0), 3000).unref()

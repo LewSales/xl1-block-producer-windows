@@ -8,10 +8,19 @@
 # minute earlier. Measured on the Pi it was the whole gate: 0.5-2% of the chain
 # at 60000, 13.6% at 5000.
 #
-# 5000 is not an aggressive value. It is MIN_POLL_INTERVAL_MS in upstream's own
-# FinalizedBlockStream — the floor XYO enforces on itself — so this sits inside
-# the rate they sanction rather than beyond it. Below 5000 there is no
-# defensible ground.
+# The presets set 3000, the value selected for this Windows host on
+# 2026-10-10 after a trial that began 2026-09-27. History: 60000 (image
+# default) -> 5000 (measured above) -> 4000 -> 3000. 5000 is
+# MIN_POLL_INTERVAL_MS in upstream's own FinalizedBlockStream, but that stream
+# is not bound in the producer role, so it is a reference point rather than a
+# floor the producer enforces.
+#
+# 3000 is a selection for this host, not a measured optimum for XL1. Its
+# reason is keeping HTTP connections to the RPC, REST and EVM endpoints warm
+# (their keep-alive windows are a few seconds); the 4000 -> 3000 step has no
+# controlled before/after, because the producer set changed during the trial.
+# Going lower only raises load on XYO's shared RPC, and nothing here supports
+# it. tests/config.test.mjs pins the value; docs/standards explains it.
 #
 # Every other field must match the image's own producer.json. This shadows the
 # whole file, not the one key, so a field left out here is a field the producer
@@ -35,3 +44,14 @@ services:
     volumes:
       - ${XL1_PRODUCER_PRESET:?XL1_PRODUCER_PRESET must be set — xl1ctl.ps1 sets it}:/opt/xl1/presets/roles/producer.json:ro
       - ${XL1_PRODUCER_PRESET_REST:?XL1_PRODUCER_PRESET_REST must be set — xl1ctl.ps1 sets it}:/opt/xl1/presets/roles/producer-rest.json:ro
+    # Bounded, rotated logs. Unbounded, one json-file grew for days, and an
+    # entry damaged at 2026-10-13 12:00Z (most likely the laptop sleeping or
+    # crashing mid-write) made every forward read -- `docker logs --since` --
+    # stop there. The collector then counted zero builds and paged "never built
+    # a block" for two days on nodes that were landing blocks. Rotation keeps a
+    # damaged entry from blinding readers for longer than one file.
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"

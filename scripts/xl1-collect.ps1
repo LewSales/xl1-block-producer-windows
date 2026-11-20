@@ -40,6 +40,55 @@ function Invoke-Docker {
   try { & docker @args 2>&1 } finally { $ErrorActionPreference = $prev }
 }
 
+# Log lines stamped at or after $Since -- a UTC RFC 3339 time, or a duration
+# such as '20m' -- read BACKWARD with --tail and filtered here, never with
+# `docker logs --since`. --since reads the json-file forward from its first
+# entry and stops dead at the first damaged one: an entry broken on 2026-10-13
+# at 12:00Z (the laptop sleeping or crashing mid-write) made every --since read
+# return nothing for days, buildsThisRun stayed 0, and the alerter paged "never
+# built a block" on nodes that were landing blocks. --tail reads from the end,
+# so it sees the recent log whatever is wrong further up.
+# -Stamped keeps docker's timestamp prefix on each line; without it the
+# message alone is returned, as `docker logs` without --timestamps would.
+# Docker's stamped lines back in the order they were written. `docker logs`
+# sends the container's stdout and stderr on separate streams, and PowerShell
+# 5.1's 2>&1 does not keep them interleaved: stderr arrives in batches after
+# the stdout around it. xl1-cli writes "Generated time payload" to stderr and
+# "Building block" to stdout, so in arrival order the payload time preceded
+# its build on about 2% of height rows (6-7 of 360 on 2026-10-22) and the rest
+# had none. Docker stamps each line with nanoseconds but drops trailing zeros,
+# so the fraction is padded before comparing; equal stamps keep arrival order.
+# [Array]::Sort on precomputed keys, not Sort-Object: 8000 lines took ~1.3 s
+# the pipeline way, for each of four containers in a 30 s cycle.
+function Sort-LogStamped {
+  param([string[]]$Lines)
+  if (-not $Lines) { return }
+  $keys = New-Object string[] $Lines.Count
+  for ($i = 0; $i -lt $Lines.Count; $i++) {
+    $stamp = if ($Lines[$i] -match '^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z ') {
+      $Matches[1] + '.' + "$($Matches[2])".PadRight(9, '0').Substring(0, 9)
+    } else { '' }
+    # The arrival index makes every key unique, so the unstable sort is deterministic.
+    $keys[$i] = $stamp + '|' + $i.ToString('D7')
+  }
+  $sorted = [string[]]$Lines.Clone()
+  [Array]::Sort($keys, $sorted, [StringComparer]::Ordinal)
+  $sorted
+}
+
+function Get-LogSince {
+  param([string]$Since, [int]$Tail = 5000, [switch]$Stamped, [string]$Name = '')
+  $target = if ($Name) { $Name } else { $Container }
+  $cut = if ($Since -match '^(\d+)([smh])$') {
+    $span = @{ s = 'FromSeconds'; m = 'FromMinutes'; h = 'FromHours' }[$Matches[2]]
+    (Get-Date).ToUniversalTime().Subtract([timespan]::$span([double]$Matches[1])).ToString('yyyy-MM-ddTHH:mm:ss')
+  } else { $Since.Substring(0, [Math]::Min(19, $Since.Length)) }
+  $lines = @(Invoke-Docker logs --timestamps --tail $Tail $target | ForEach-Object { "$_" } | Where-Object {
+    $_ -match '^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\S*Z ' -and [string]::CompareOrdinal($Matches[1], $cut) -ge 0
+  })
+  Sort-LogStamped $lines | ForEach-Object { if ($Stamped) { $_ } else { $_ -replace '^\S+Z ', '' } }
+}
+
 # $PSScriptRoot is not populated while param() defaults are evaluated in
 # PowerShell 5.1 -- it is set when the body starts. A default referring to it
 # silently becomes an empty path.
@@ -52,7 +101,9 @@ New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
 # document unparseable to JSON.parse -- the dashboard reported exactly that, by
 # name, rather than going quiet, which is the only reason this took one attempt.
 function Write-Json($Object, [string]$Path) {
-  $json = $Object | ConvertTo-Json -Depth 6
+  # Compact: only the dashboard reads this file, and the per-height rows made the
+  # indented form ten times the size of the data in it.
+  $json = $Object | ConvertTo-Json -Depth 7 -Compress
   # Validate before publishing so the dashboard never reads a half-written file.
   try { $null = $json | ConvertFrom-Json }
   catch { Write-Error 'produced invalid JSON; kept previous snapshot'; exit 1 }
@@ -185,7 +236,7 @@ $sinceArg = if (Test-Path $since) { (Get-Content $since -Raw).Trim() } else { $n
 # purely to stamp the recent-log panel -- that used to cost a second CLI
 # process and Engine API round trip every single cycle, forever.
 $rawNewLog = @(
-  $(if ($sinceArg) { Invoke-Docker logs --timestamps --since $sinceArg $Container } else { Invoke-Docker logs --timestamps --tail 2000 $Container }) |
+  $(if ($sinceArg) { Get-LogSince $sinceArg -Stamped } else { Sort-LogStamped @(Invoke-Docker logs --timestamps --tail 2000 $Container | ForEach-Object { "$_" }) }) |
     ForEach-Object { "$_" }
 )
 Set-Content -Path $since -Value $collectedAt -NoNewline
@@ -221,7 +272,9 @@ if (Test-Path $runFile) {
   if ($parts.Count -ge 2) { $prevStarted = $parts[0]; [int]::TryParse($parts[1], [ref]$builds) | Out-Null }
 }
 if ($prevStarted -ne $f[2]) {
-  $builds = @(Invoke-Docker logs --since $f[2] $Container | Select-String -Pattern 'building block').Count
+  # Once per container start, so a deeper read is affordable here; the answer
+  # that matters is whether it is zero.
+  $builds = @(Get-LogSince $f[2] -Tail 20000 | Select-String -Pattern 'building block').Count
 }
 else {
   $builds += @($newLog | Select-String -Pattern 'building block').Count
@@ -265,10 +318,18 @@ try {
                         @('blockProduction', $statz.timings.blockProduction),
                         @('mempoolTx', $statz.timings.mempoolPendingTransactionsFetch),
                         @('mempoolBlocks', $statz.timings.mempoolPendingBlocksFetch),
-                        @('submit', $statz.timings.mempoolSubmitBlock))) {
+                        @('submit', $statz.timings.mempoolSubmitBlock),
+                        # xl1-cli 5.5.0+ also times the time payload (two sequential
+                        # Sepolia calls for the EVM anchor, the largest measured step on
+                        # the producing path) and the reward diviner. Older CLIs omit
+                        # both keys and the stages simply drop out.
+                        @('timePayload', $statz.timings.timePayloadGeneration),
+                        @('rewardTransfers', $statz.timings.blockRewardTransfers))) {
       if ($null -ne $pair[1] -and $null -ne $pair[1].p50Ms) { $stages[$pair[0]] = $pair[1].p50Ms }
     }
     if ($stages.Count -gt 0) { $lat.stages = $stages }
+    $tp = $statz.timings.timePayloadGeneration
+    if ($null -ne $tp -and $null -ne $tp.p95Ms) { $lat.timePayloadP95Ms = $tp.p95Ms }
     # Whether the node is keeping up, which is what decides whether a slow cycle
     # is a fault or just a characteristic. Same payload, no extra request.
     if ($null -ne $statz.counts) {
@@ -350,7 +411,7 @@ if (Test-Path $lastPub) {
 # ----------------------------------------------------------------- eligibility
 $eligCache = Join-Path $StateDir '.eligibility'
 if ((Get-CacheAge $eligCache) -gt 120) {
-  $eligLog = (Invoke-Docker logs --since $EligibilityWindow $Container | Out-String).ToLower()
+  $eligLog = (Get-LogSince $EligibilityWindow | Out-String).ToLower()
   $key = ''; $reason = ''
   if ($eligLog) {
     # needle -> key, prose. The key is stable; the prose may be reworded.
@@ -511,6 +572,142 @@ if (Test-Path $osCache) {
     $os.updatesAgeHours = [math]::Round((Get-CacheAge $osCache) / 3600, 1)
     $doc.os = $os
   }
+}
+
+# ---------------------------------------------------------------------- clock
+#
+# Whether this machine's timestamps can be compared with another host's. Race
+# arrival times are only as good as the clock that stamped them, and Windows
+# Time polls rarely -- 32768 s (about nine hours) measured on this host -- so the
+# last sync is reported beside a measured offset rather than "synced" assumed.
+# One NTP sample is a network round trip, so this is cached for ten minutes.
+$clockCache = Join-Path $StateDir '.clock'
+if ((Get-CacheAge $clockCache) -gt 600) {
+  $prevPref = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+  try {
+    $st = (& w32tm /query /status 2>&1 | Out-String)
+    $clk = [ordered]@{ checkedAt = $collectedAt }
+    if ($st -match 'Source:\s*(\S+)') { $clk.source = ($Matches[1] -replace ',0x\w+$', '') }
+    if ($st -match 'Stratum:\s*(\d+)') { $clk.stratum = [int]$Matches[1] }
+    if ($st -match 'Root Dispersion:\s*([\d.]+)s') { $clk.rootDispersionMs = [math]::Round([double]$Matches[1] * 1000) }
+    if ($st -match 'Poll Interval:\s*\d+\s*\((\d+)s\)') { $clk.pollIntervalSeconds = [int]$Matches[1] }
+    if ($st -match 'Last Successful Sync Time:\s*(.+)') {
+      try { $clk.lastSyncAt = ([datetime]::Parse($Matches[1].Trim())).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') } catch { }
+    }
+    # A free-running clock has nothing to be synced to; say so instead of measuring.
+    $hasSource = $clk.source -and $clk.source -notmatch 'Local|Free-running|CMOS'
+    $clk.synced = [bool]($hasSource -and $clk.lastSyncAt)
+    $peer = if ($hasSource) { $clk.source } else { 'time.windows.com' }
+    $sc = (& w32tm /stripchart /computer:$peer /samples:1 /dataonly 2>&1 | Out-String)
+    if ($sc -match ',\s*([+-]\d+\.\d+)s') { $clk.offsetMs = [math]::Round([double]$Matches[1] * 1000, 1); $clk.offsetAgainst = $peer }
+    Set-Content -Path $clockCache -Value ($clk | ConvertTo-Json -Compress) -NoNewline
+  } catch { } finally { $ErrorActionPreference = $prevPref }
+}
+if (Test-Path $clockCache) { try { $doc.clock = Get-Content $clockCache -Raw | ConvertFrom-Json } catch { } }
+
+# ------------------------------------------------------- every local producer
+#
+# This host runs more than one producer, and everything above describes one of
+# them. A producer nobody has a panel for is one nobody is watching -- that is
+# how a Mainnet key ran for days building candidates and winning none. Each gets
+# the same few counters from its own log, every five minutes.
+#
+# Wins are NOT counted here, for the same reason as in the race section: the
+# chain decides those, and the oxyon.io race view reports them. Only the network
+# and the reward address are read from each container's environment, and they
+# are picked out by the template itself, so a recovery phrase in the same
+# environment never leaves Docker.
+$fleetCache = Join-Path $StateDir '.local-producers'
+if ((Get-CacheAge $fleetCache) -gt 300) {
+  $rows = @()
+  $names = @(Invoke-Docker ps -a --filter 'name=preset' --format '{{.Names}}' | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+  # Backtick strings, not double quotes: PowerShell 5.1 strips embedded double
+  # quotes when it hands an argument to a native program, and the template then
+  # matches nothing.
+  $envTpl = '{{range .Config.Env}}{{if or (eq (index (split . `=`) 0) `XL1_NETWORK`) (eq (index (split . `=`) 0) `XL1_REWARD_ADDRESS`) (eq (index (split . `=`) 0) `XL1_EVM_RPC_URL`)}}{{println .}}{{end}}{{end}}'
+  foreach ($n in $names) {
+    $i = Invoke-Docker inspect $n --format '{{.State.Status}}|{{.State.Running}}|{{.State.StartedAt}}|{{.RestartCount}}'
+    if ($LASTEXITCODE -ne 0 -or -not $i) { continue }
+    $p = "$i".Trim() -split '\|'
+    $envLines = @(Invoke-Docker inspect $n --format $envTpl | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    $net = "$($envLines | Where-Object { $_ -like 'XL1_NETWORK=*' } | Select-Object -First 1)" -replace '^XL1_NETWORK=', ''
+    $reward = "$($envLines | Where-Object { $_ -like 'XL1_REWARD_ADDRESS=*' } | Select-Object -First 1)" -replace '^XL1_REWARD_ADDRESS=(0x)?', ''
+    # The Ethereum endpoint the time payload comes from: the host only. The URL
+    # is one of the image's secrets -- Alchemy and Infura carry the API key in
+    # its path -- so only the hostname leaves this loop. No host: the variable
+    # is unset and the image's default is in use.
+    $evmUrl = "$($envLines | Where-Object { $_ -like 'XL1_EVM_RPC_URL=*' } | Select-Object -First 1)" -replace '^XL1_EVM_RPC_URL=', ''
+    $evmHost = if ($evmUrl -match '^[A-Za-z][A-Za-z0-9+.-]*://(?:[^/?#@]*@)?([A-Za-z0-9.-]+)') { $Matches[1].ToLower() } else { $null }
+    $evmUrl = $null
+    $raw = @(Get-LogSince '1h' -Tail 8000 -Name $n -Stamped)
+    $msg = @($raw | ForEach-Object { $_ -replace '^\S+Z ', '' })
+    $row = [ordered]@{
+      # main-653e, seq-23b3, node: the container name without its compose wrapping.
+      id                 = ($n -replace '^xl1-', '' -replace '-preset-\d+$', '')
+      network            = $(if ($net) { $net } else { $null })
+      rewardAddress      = $(if ($reward -match '^[0-9a-fA-F]{40}$') { $reward.ToLower() } else { $null })
+      state              = $p[0]
+      running            = ($p[1] -eq 'true')
+      startedAt          = $p[2]
+      restartCount       = [int]$p[3]
+      windowSeconds      = 3600
+      builds             = @($msg | Where-Object { $_ -match 'Building block \d+$' }).Count
+      retries            = @($msg | Where-Object { $_ -match 'Building block \d+ \(retry' }).Count
+      validationFailures = @($msg | Where-Object { $_ -like '*Block validation failed*' }).Count
+      rejected           = @($msg | Where-Object { $_ -like '*No candidate block can be appended*' }).Count
+      evmRpc             = [ordered]@{ host = $evmHost }
+    }
+    $tp = @($msg | ForEach-Object { if ($_ -match 'Generated time payload in (\d+)ms') { [int]$Matches[1] } } | Sort-Object)
+    if ($tp.Count) {
+      $row.timePayloadP50Ms = $tp[[int][Math]::Floor($tp.Count * 0.5)]
+      $row.timePayloadP95Ms = $tp[[Math]::Min($tp.Count - 1, [int][Math]::Floor($tp.Count * 0.95))]
+    }
+    $lb = $raw | Where-Object { $_ -match 'Building block \d+' } | Select-Object -Last 1
+    if ($lb -and $lb -match '^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})') { $row.lastBuildAt = "$($Matches[1])Z" }
+
+    # One row per height this producer attempted, newest last: when it started
+    # building (this host's clock), how many retries, how many validation
+    # failures and rejections, and how long the time payload before it took.
+    # oxyon.io joins these to the chain and the race observer by (network,
+    # height, producer) to say why a height was lost. Bounded to the last 360.
+    $byN = [ordered]@{}; $cur = $null; $tpLast = $null
+    foreach ($line in $raw) {
+      if ($line -notmatch '^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?)Z (.*)$') { continue }
+      $stamp = $Matches[1]; $text = $Matches[2]
+      if ($text -match 'Generated time payload in (\d+)ms') { $tpLast = [int]$Matches[1]; continue }
+      if ($text -match 'Building block (\d+)( \(retry (\d+)\))?$') {
+        $n = $Matches[1]
+        if (-not $byN.Contains($n)) {
+          $at = [DateTimeOffset]::Parse("${stamp}Z").ToUnixTimeMilliseconds()
+          $byN[$n] = @([long]$n, [long]$at, 0, 0, 0, $tpLast)
+        }
+        if ($Matches[3]) { $byN[$n][2] = [Math]::Max([int]$byN[$n][2], [int]$Matches[3]) }
+        $cur = $n; $tpLast = $null; continue
+      }
+      if ($cur -and $text -like '*Block validation failed*') { $byN[$cur][3] = [int]$byN[$cur][3] + 1; continue }
+      if ($cur -and $text -like '*No candidate block can be appended*') { $byN[$cur][4] = [int]$byN[$cur][4] + 1 }
+    }
+    $hr = @($byN.Values)
+    if ($hr.Count) {
+      $row.heights = [ordered]@{
+        columns = @('n', 'buildAt', 'retries', 'validationFailures', 'rejected', 'timePayloadMs')
+        rows    = [object[]]@($hr | Select-Object -Last 360 | ForEach-Object { ,([object[]]$_) })
+      }
+    }
+    $rows += ,$row
+  }
+  # Only cache an answer docker actually gave: an empty list from a failed `ps`
+  # would read as "this host runs no producers".
+  if ($names.Count) { Set-Content -Path $fleetCache -Value (ConvertTo-Json -InputObject @($rows) -Depth 4 -Compress) -NoNewline }
+}
+if (Test-Path $fleetCache) {
+  try {
+    # Rebuilt as plain ordered maps: an array read back by ConvertFrom-Json and
+    # written again under PowerShell 5.1 serialises as {"value":[...],"Count":n}.
+    $doc.localProducers = [object[]]@(Get-Content $fleetCache -Raw | ConvertFrom-Json | ForEach-Object { $_ } | ForEach-Object {
+      $h = [ordered]@{}; foreach ($pr in $_.PSObject.Properties) { $h[$pr.Name] = $pr.Value }; $h
+    })
+  } catch { }
 }
 
 $doc.host = Get-HostMetrics

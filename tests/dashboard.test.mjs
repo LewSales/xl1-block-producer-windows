@@ -38,6 +38,8 @@ process.env.DASH_PEER_LABELS ??= [
 // Day bucketing is read at import. Pinned to UTC so the window assertions below
 // mean the same thing on a laptop in Denver and in CI.
 process.env.DASH_DAY_TZ ??= 'UTC'
+// History checkpoints go to a temp file, never the real state directory.
+process.env.DASH_HISTORY_FILE ??= join(tmpdir(), `xl1-history-test-${process.pid}.json`)
 const m = await import('../dashboard/server.mjs')
 
 // ---------------------------------------------------------------- pure logic
@@ -230,9 +232,16 @@ test('the mount remedy is the one for the host it is printed on', () => {
 test('a blocked producer surfaces every real fault', async () => {
   baselineHealthyState()
   await loadSnapshot('blocked.json')
-  const o = m.overall()
+  // Past the dashboard's own warm-up, so missing chain evidence is a fact
+  // about the chain reading, not about a process that just started.
+  const started = m.state.startedAt
+  m.state.startedAt = new Date(Date.now() - 3_600_000).toISOString()
+  let o
+  try { o = m.overall() } finally { m.state.startedAt = started }
   const joined = o.problems.join(' | ')
-  assert.match(joined, /ineligible/i)
+  // No chain reading in this fixture: the complaint is shown, and labelled as
+  // the node's own unverified report rather than as an established cause.
+  assert.match(joined, /reports not on the allowed-producer list — unverified/)
   assert.match(joined, /5\.2\.2 behind published 5\.3\.0/)
   assert.match(joined, /security update/i)
   assert.match(joined, /reboot required/i)
@@ -957,10 +966,12 @@ test('streaks count blocks since the last win, oldest-first ring', () => {
 // the only thing that says which build answered. It must degrade to "unknown"
 // rather than throwing or, worse, claiming a version it is not.
 
-test('the snapshot carries a build identity', () => {
+test('the snapshot carries a build identity', async () => {
   const b = m.snapshot().build
   assert.ok(b, 'every snapshot must identify the build serving it')
-  assert.equal(b.version, '2.3.1', 'read from package.json, not hardcoded')
+  // Compared with package.json itself: a literal here failed on every version bump.
+  const pkg = JSON.parse(await readFile(join(here, '..', 'dashboard', 'package.json'), 'utf8'))
+  assert.equal(b.version, pkg.version, 'read from package.json, not hardcoded')
   // Unstamped in the test environment, which is exactly the fallback path an
   // argument-less `docker build` takes.
   assert.equal(b.commit, 'unknown')
@@ -1483,7 +1494,7 @@ test('a peer summary keeps only the fields the card draws', () => {
     status: 'degraded',
     problems: ['a', 'b', 'c', 'd', 'e', 'f'],
     build: { version: '2.2.3', commit: 'abc' },
-    chain: { currentBlock: 100 },
+    chain: { currentBlock: 100, network: 'mainnet' },
     derived: { blocksByWindow: { day24h: 12 } },
     peers: { self: { blocks: 500, sharePercent: 9.5, rank: 4, address: 'aa' }, producers: 8, scannedBlocks: 1000 },
     alerts: { installed: true, running: true, active: [{ key: 'x' }] },
@@ -1492,6 +1503,7 @@ test('a peer summary keeps only the fields the card draws', () => {
     history: { height: new Array(240).fill({ t: 1, v: 2 }) },
   })
   assert.equal(summary.blocksTotal, 500)
+  assert.equal(summary.network, 'mainnet', 'the peer says which chain its counts are on')
   assert.equal(summary.alertsFiring, 1)
   assert.equal(summary.problems.length, 4, 'problems are capped, not copied wholesale')
   assert.equal(summary.history, undefined, 'a peer cannot push its history into this payload')
@@ -1505,7 +1517,7 @@ test('an unrecognised status from a peer is not taken at face value', () => {
 test('combined share is withheld unless the nodes scanned the same blocks', async () => {
   process.env.DASH_FLEET = 'a=http://127.0.0.1:9/api/status'
   const fresh = await import(`../dashboard/server.mjs?fleet=${Date.now()}`)
-  fresh.fleet.set('a', { label: 'a', ok: true, blocksTotal: 100, sharePercent: 5, scannedBlocks: 2000 })
+  fresh.fleet.set('a', { label: 'a', ok: true, network: 'sequence', blocksTotal: 100, sharePercent: 5, scannedBlocks: 2000 })
   // This node scanned a different window, so the two shares describe different
   // denominators and adding them would be arithmetic on unlike things.
   fresh.production.scanned = 1000
@@ -1516,6 +1528,24 @@ test('combined share is withheld unless the nodes scanned the same blocks', asyn
   assert.equal(view.combinedSharePercent, undefined, 'unlike windows do not add')
   assert.equal(view.combinedBlocks, 150, 'but the block counts still total')
   assert.equal(view.combinedFrom, 2, 'and say how many nodes they came from')
+})
+
+test('blocks on another network are shown but never added in', async () => {
+  process.env.DASH_FLEET = 'b=http://127.0.0.1:9/api/status,c=http://127.0.0.1:9/api/status'
+  const fresh = await import(`../dashboard/server.mjs?fleet=${Date.now()}n`)
+  fresh.fleet.set('b', { label: 'b', ok: true, network: 'mainnet', blocksTotal: 4000, sharePercent: 22, scannedBlocks: 1000 })
+  // No network at all: an older or odd peer. Not assumed to be on this chain.
+  fresh.fleet.set('c', { label: 'c', ok: true, blocksTotal: 7, sharePercent: 1, scannedBlocks: 1000 })
+  fresh.production.scanned = 1000
+  fresh.peers.set(SELF, 50)
+  const view = fresh.fleetView(fresh.peerBoard())
+  assert.equal(view.nodes.find((n) => n.isSelf).network, 'sequence', 'this node names its own network')
+  assert.equal(view.nodes.find((n) => n.label === 'b').network, 'mainnet', 'and each peer keeps its own')
+  assert.equal(view.combinedBlocks, 50, 'mainnet and unlabelled blocks are not added to a sequence total')
+  assert.equal(view.combinedFrom, 1)
+  assert.equal(view.combinedNetwork, 'sequence')
+  assert.deepEqual(view.networks.sort(), ['mainnet', 'sequence'])
+  assert.equal(view.combinedSharePercent, undefined, 'one node is no combination')
 })
 
 test('an unreachable peer is a row, not an omission', async () => {
@@ -1605,6 +1635,40 @@ test('nothing that identifies the machine survives the projection', () => {
     assert.equal(JSON.stringify(pub.trend ?? {}).includes(forbidden), false,
       `${forbidden} is a host reading and must not ride along in the trend`)
   }
+})
+
+test('clock and local producers are published by named field only', () => {
+  m.state.node = {
+    ok: true,
+    clock: { synced: true, source: 'time.windows.com', offsetMs: 35.2, stratum: 5, rootDispersionMs: 305,
+      pollIntervalSeconds: 32768, lastSyncAt: '2026-10-18T15:27:48Z', checkedAt: '2026-10-18T19:00:00Z', CANARY: 'CANARY-CLOCK' },
+    localProducers: [{
+      id: 'main-653e', network: 'mainnet', rewardAddress: 'a9304753eade52dd22b1a6fc519b571a4dc2653e',
+      running: true, restartCount: 0, startedAt: '2026-10-16T21:26:37Z', windowSeconds: 3600,
+      builds: 378, retries: 11, validationFailures: 11, rejected: 2, timePayloadP50Ms: 371, timePayloadP95Ms: 563,
+      lastBuildAt: '2026-10-18T19:00:00Z', name: 'CANARY-CONTAINER', image: 'CANARY-IMAGE', mnemonic: 'CANARY-PHRASE',
+      heights: { columns: ['ignored'], rows: [[1827870, 1792353777865, 0, 1, 1, 25998, 'CANARY-EXTRA'], ['CANARY-ROW', 2], 'not-a-row'] },
+    }],
+  }
+  const pub = m.publicView(m.peerBoard())
+  assert.equal(pub.clock.offsetMs, 35.2)
+  assert.equal(pub.clock.synced, true)
+  assert.equal(pub.localProducers.length, 1)
+  assert.equal(pub.localProducers[0].id, 'main-653e')
+  assert.equal(pub.localProducers[0].builds, 378)
+  assert.deepEqual(pub.localProducers[0].heights.columns, ['n', 'buildAt', 'retries', 'validationFailures', 'rejected', 'timePayloadMs'],
+    'the columns are the agreed ones, never whatever the collector sent')
+  assert.deepEqual(pub.localProducers[0].heights.rows[0], [1827870, 1792353777865, 0, 1, 1, 25998], 'six numbers, extras dropped')
+  assert.deepEqual(pub.localProducers[0].heights.rows[1], [null, 2], 'a non-number becomes null, never text')
+  assert.equal(pub.localProducers[0].heights.rows.length, 2, 'a value that is not a row is dropped')
+  const text = JSON.stringify(pub)
+  for (const canary of ['CANARY-CLOCK', 'CANARY-CONTAINER', 'CANARY-IMAGE', 'CANARY-PHRASE']) {
+    assert.equal(text.includes(canary), false, `${canary} reached the public payload`)
+  }
+  m.state.node = { ok: true }
+  const bare = m.publicView(m.peerBoard())
+  assert.equal(bare.clock, undefined, 'no clock reading means no clock field, not a zero offset')
+  assert.equal(bare.localProducers, undefined)
 })
 
 test('the status is a word, never the sentences behind it', () => {
@@ -1723,4 +1787,752 @@ test('once the collector reports, the real host figures take over', async () => 
   assert.equal(s.hostUnavailable, undefined)
   assert.equal(s.hostname, 'REAL-PC')
   assert.equal(s.memory.totalBytes, 16890322944)
+})
+
+// ------------------------------------------------- eligibility vs the chain
+// 2026-10-10: on Mainnet the Pi logged "Producer … has insufficient stake" about
+// itself ~12 times an hour while landing ~1 block in 5, and the page and the
+// alerter reported "Producer cannot produce". Each case below is one failure
+// category with the evidence that defines it. Real readings from 18:53Z:
+// height 1756396, own block 1756385.
+
+const HOUR = 3_600_000
+let savedSelfRecord
+function scenario({ complaint = 'insufficient-stake', running = true, chain = 'fresh', current = 1756396, lastOwn = 1756385, behind = 0, warm = true, record = 0 } = {}) {
+  baselineHealthyState()
+  // This node's persisted production record (peers.json counts).
+  savedSelfRecord = m.peers.get(SELF)
+  if (record) m.peers.set(SELF, record); else m.peers.delete(SELF)
+  m.state.startedAt = new Date(Date.now() - (warm ? HOUR : 1000)).toISOString()
+  const reasons = { 'insufficient-stake': 'insufficient stake', 'not-allowed': 'not on the allowed-producer list' }
+  m.state.node = {
+    ok: true, stale: false, collectedAt: new Date().toISOString(),
+    container: { running },
+    eligibility: complaint ? { blocked: true, key: complaint, reason: reasons[complaint], window: '20m' } : { blocked: false },
+    eligibilityIgnored: false,
+  }
+  const polledAt = chain === 'stale' ? new Date(Date.now() - 10 * 60_000).toISOString() : new Date().toISOString()
+  m.state.chain = chain === 'down'
+    ? { ok: false, error: 'fetch failed', polledAt }
+    : { ok: true, chainIdMatchesPreset: true, balances: {}, currentBlock: current, polledAt }
+  Object.assign(m.production, { lastBlock: lastOwn === null ? undefined : lastOwn, behind })
+}
+function reset() {
+  Object.assign(m.production, { lastBlock: undefined, behind: undefined }); m.state.startedAt = new Date().toISOString()
+  if (savedSelfRecord === undefined) m.peers.delete(SELF); else m.peers.set(SELF, savedSelfRecord)
+}
+const run = (opts) => { scenario(opts); try { return { o: m.overall(), n: m.snapshot().node, v: m.eligibilityVerdict() } } finally { reset() } }
+const has = (o, re) => o.problems.some((p) => re.test(p))
+
+test('normal production with a stake complaint: contradicted, no fault, no page', () => {
+  const { o, n, v } = run({})
+  assert.equal(v.category, 'contradicted')
+  assert.equal(o.status, 'ok', JSON.stringify(o.problems))
+  assert.equal(n.eligibilityIgnored, true, 'the alerter reads eligibilityIgnored')
+  assert.equal(n.eligibilityContradicted, true)
+  assert.match(n.eligibilityNote, /produced 11 blocks ago/)
+  assert.equal(n.eligibility.reason, 'insufficient stake', 'what the node said is still served')
+})
+
+test('normal production without any complaint: nothing to say', () => {
+  const { o, v } = run({ complaint: null })
+  assert.equal(v.category, 'none'); assert.equal(o.status, 'ok')
+})
+
+test('no recent block is NOT reported as insufficient stake', () => {
+  const { o, n, v } = run({ lastOwn: 1756396 - 500 })
+  assert.equal(v.category, 'not-landing')
+  assert.ok(has(o, /^not landing blocks: 500 blocks since/), JSON.stringify(o.problems))
+  assert.ok(!has(o, /ineligible/i), 'the complaint must not be named as the cause')
+  assert.ok(has(o, /reports insufficient stake \(unconfirmed\)/), 'the complaint is context, labelled unconfirmed')
+  assert.equal(n.eligibilityIgnored, true, 'no "cannot produce" page; the alerter’s not-producing check owns this symptom')
+})
+
+test('no block from this node ever seen: the complaint counts, worded as a self-report', () => {
+  const { o, n, v } = run({ lastOwn: null })
+  assert.equal(v.category, 'unconfirmed')
+  assert.ok(has(o, /producer ineligible: insufficient stake \(the node.s own report; no block from it seen on chain\)/), JSON.stringify(o.problems))
+  assert.equal(n.eligibilityIgnored, false, 'this is the one case the alerter should page on')
+  assert.match(n.eligibility.reason, /no block from this node has been seen on chain/, 'the page message carries the evidence')
+  assert.equal(n.eligibility.selfReport, 'insufficient stake')
+})
+
+test('stale chain data: no contradiction, stale data is its own fault', () => {
+  const { o, n, v } = run({ chain: 'stale' })
+  assert.equal(v.category, 'unverified')
+  assert.ok(has(o, /^chain data stale \(\d+ s\)/), JSON.stringify(o.problems))
+  assert.ok(has(o, /producer reports insufficient stake — unverified: chain data is \d+ s old/))
+  assert.equal(n.eligibilityContradicted, undefined, 'a frozen reading must not vouch for production')
+})
+
+test('RPC failure: chain unreachable, the complaint stays a labelled, unverified fault', () => {
+  const { o, n, v } = run({ chain: 'down' })
+  assert.equal(v.category, 'unverified')
+  assert.ok(has(o, /^chain unreachable$/))
+  assert.ok(has(o, /unverified: chain data unavailable/))
+  assert.equal(n.eligibilityIgnored, false, 'fail safe: without evidence the complaint still pages')
+  assert.match(n.eligibility.reason, /chain data unavailable/)
+})
+
+test('missing telemetry from the block scan (far behind) is not evidence either way', () => {
+  const { v } = run({ behind: 500 })
+  assert.equal(v.category, 'unverified')
+})
+
+test('a last block ahead of the chain head is not evidence', () => {
+  const { v } = run({ current: 100, lastOwn: 150 })
+  assert.equal(v.category, 'unverified')
+})
+
+test('producer shut down: no complaint-named fault; the container state is the fault', () => {
+  const { o, n, v } = run({ running: false })
+  assert.equal(v.category, 'producer-down')
+  assert.equal(o.status, 'down')
+  assert.ok(!has(o, /ineligible|reports insufficient/), JSON.stringify(o.problems))
+  assert.equal(n.eligibilityIgnored, true)
+})
+
+test('dashboard warm-up: no page before the chain has been read', () => {
+  const { o, n, v } = run({ chain: 'down', warm: false })
+  assert.equal(v.category, 'unverified')
+  assert.equal(v.counts, false)
+  assert.equal(n.eligibilityIgnored, true, 'a dashboard restart must not page "cannot produce"')
+  assert.match(n.eligibilityNote, /dashboard starting/)
+  assert.ok(has(o, /^chain unreachable$/), 'the chain problem is still shown')
+})
+
+test('the threshold is inclusive at exactly N, and N+1 is not-landing', () => {
+  assert.equal(run({ current: 1000, lastOwn: 1000 - m.ELIGIBILITY_CHAIN_BLOCKS }).v.category, 'contradicted')
+  assert.equal(run({ current: 1000, lastOwn: 1000 - m.ELIGIBILITY_CHAIN_BLOCKS - 1 }).v.category, 'not-landing')
+})
+
+test('an authorization complaint follows the same evidence rules', () => {
+  assert.equal(run({ complaint: 'not-allowed', current: 500, lastOwn: 498 }).v.category, 'contradicted')
+  assert.equal(run({ complaint: 'not-allowed', lastOwn: null }).v.category, 'unconfirmed')
+})
+
+test('the per-network ignore list still applies on its own', () => {
+  scenario({})
+  m.state.node.eligibilityIgnored = true; m.state.node.eligibilityNote = 'not enforced on sequence'
+  try {
+    const v = m.eligibilityVerdict()
+    assert.equal(v.category, 'not-enforced'); assert.equal(v.note, 'not enforced on sequence')
+    assert.equal(m.snapshot().node.eligibilityContradicted, undefined)
+  } finally { reset() }
+})
+
+test('the verdict never rewrites collected state', () => {
+  scenario({ lastOwn: null })
+  try { m.snapshot(); assert.equal(m.state.node.eligibility.reason, 'insufficient stake'); assert.equal(m.state.node.eligibilityIgnored, false) } finally { reset() }
+})
+
+// 2026-10-10, 2.3.2 rollout: ~30 s after a dashboard restart the alerter paged
+// "cannot produce ... no block from this node seen on chain" for a node that had
+// produced a block seconds earlier. The head was known, our last block not yet.
+test('after a restart, a node with a production record is never "never seen"', () => {
+  const { o, n, v } = run({ lastOwn: null, record: 7300 })
+  assert.equal(v.category, 'unverified')
+  assert.equal(v.counts, false)
+  assert.equal(n.eligibilityIgnored, true, 'the alerter must not page "cannot produce"')
+  assert.match(n.eligibilityNote, /7300 blocks on record, its latest not yet located/)
+  assert.ok(!o.problems.some((p) => /ineligible/.test(p)), JSON.stringify(o.problems))
+})
+
+test('during warm-up, no own block seen yet is not a fault either', () => {
+  const { n, v } = run({ lastOwn: null, record: 0, warm: false })
+  assert.equal(v.category, 'unverified'); assert.equal(v.counts, false)
+  assert.equal(n.eligibilityIgnored, true)
+})
+
+test('a genuinely new node with no record, after warm-up, still pages unconfirmed', () => {
+  const { n, v } = run({ lastOwn: null, record: 0, warm: true })
+  assert.equal(v.category, 'unconfirmed'); assert.equal(n.eligibilityIgnored, false)
+})
+
+test('loadPeers restores the last own block from the persisted recent strip', async () => {
+  const { mkdtemp: mt, writeFile: wf } = await import('node:fs/promises')
+  const dir = await mt(join(tmpdir(), 'xl1-peers-'))
+  const f = join(dir, 'peers.json')
+  await wf(f, JSON.stringify({ v: 3, since: new Date().toISOString(), updatedAt: new Date().toISOString(), scannedFrom: 100, scannedTo: 200, scanned: 100, counts: { [SELF]: 12 },
+    recent: [{ n: 190, mine: true, t: 1000 }, { n: 195, mine: false, t: 2000 }, { n: 198, mine: true, t: 3000 }, { n: 199, mine: false, t: 4000 }], days: {} }))
+  const was = process.env.DASH_PEERS_FILE
+  process.env.DASH_PEERS_FILE = f
+  try {
+    const fresh = await import(`../dashboard/server.mjs?peers=${Date.now()}`)
+    await fresh.loadPeers()
+    assert.equal(fresh.production.lastBlock, 198)
+    assert.equal(fresh.production.lastBlockAt, 3000)
+  } finally { if (was === undefined) delete process.env.DASH_PEERS_FILE; else process.env.DASH_PEERS_FILE = was }
+})
+
+// ------------------------------------------------------------ reward accounting
+// 2.3.3: the page said "~50 XL1 per block" everywhere. Mainnet passed block
+// 1,000,000 on 2026-05-19 and has paid producers 47.5 since; Sequence's history
+// followed other rules entirely. Rewards now come from the transfer recorded in
+// each of our blocks. Fixtures are real public blocks from XYO's block CDN.
+const A18 = 10n ** 18n
+const xl1 = (s) => { const [w, f = ''] = String(s).split('.'); return BigInt(w) * A18 + BigInt((f + '0'.repeat(18)).slice(0, 18)) }
+function resetLedger() {
+  Object.assign(m.ledger, { since: undefined, through: undefined, preLedgerBlocks: undefined, preLedgerFrom: undefined, recorded: 0n, recordedBlocks: 0, estimated: 0n, estimatedBlocks: 0, unknownBlocks: 0, fees: 0n, last: undefined })
+}
+
+test('the protocol schedule: 500, then x0.95 every 1,000,000 blocks, floor 10', () => {
+  assert.equal(m.protocolBlockReward(1), xl1('500'))
+  assert.equal(m.protocolBlockReward(999_999), xl1('500'), 'last block of step 1')
+  assert.equal(m.protocolBlockReward(1_000_000), xl1('475'), 'first block of step 2 (Mainnet, 2026-05-19)')
+  assert.equal(m.protocolBlockReward(1_999_999), xl1('475'))
+  assert.equal(m.protocolBlockReward(2_000_000), xl1('451.25'))
+  assert.equal(m.protocolBlockReward(3_000_000), xl1('428.6875'))
+  assert.equal(m.protocolBlockReward(200_000_000), xl1('10'), 'never below the 10 XL1 floor')
+  assert.equal(m.protocolBlockReward(0), undefined, 'block 0 is the creator allocation, not a producer reward')
+  assert.equal(m.protocolProducerReward(999_999), xl1('50'))
+  assert.equal(m.protocolProducerReward(1_000_000), xl1('47.5'))
+  assert.equal(m.protocolProducerReward(2_000_000), xl1('45.125'))
+})
+
+test('a real Mainnet block records 47.5 XL1 to its producer, plus a fee', async () => {
+  const [bw, payloads] = JSON.parse(await fixture('mainnet-block-1758531.json'))
+  const r = m.recordedRewards(payloads, bw.addresses[0])
+  assert.equal(r.reward, xl1('47.5'))
+  assert.equal(r.total, xl1('475'))
+  assert.equal(r.fees, xl1('0.0001216'), 'a transaction fee paid to the producer inside its block')
+})
+
+test('a real Sequence block records 50 XL1 to its producer', async () => {
+  const [bw, payloads] = JSON.parse(await fixture('sequence-block-669230.json'))
+  const r = m.recordedRewards(payloads, bw.addresses[0])
+  assert.equal(r.reward, xl1('50')); assert.equal(r.total, xl1('500'))
+})
+
+test('the reward follows the reward address, not the signer', async () => {
+  const [, payloads] = JSON.parse(await fixture('mainnet-block-1758531.json'))
+  assert.equal(m.recordedRewards(payloads, 'f'.repeat(40)).reward, undefined, 'a different recipient was paid nothing')
+})
+
+test('the ledger: recorded first, estimated (Mainnet) or unknown (Sequence) without a transfer', async () => {
+  resetLedger()
+  const [bw, payloads] = JSON.parse(await fixture('mainnet-block-1758531.json'))
+  const me = bw.addresses[0]
+  try {
+    assert.equal(m.accountBlock(1758531, payloads, { recipient: me, net: 'mainnet' }), 'recorded')
+    assert.equal(m.accountBlock(1758600, undefined, { recipient: me, net: 'mainnet' }), 'estimated')
+    assert.equal(m.accountBlock(669_300, undefined, { recipient: me, net: 'sequence' }), 'unknown')
+    assert.equal(m.ledger.recorded, xl1('47.5')); assert.equal(m.ledger.estimated, xl1('47.5'))
+    assert.equal(m.ledger.unknownBlocks, 1)
+    assert.equal(m.ledger.fees, xl1('0.0001216'))
+    assert.equal(m.ledger.last.n, 1758531)
+  } finally { resetLedger() }
+})
+
+test('a block at or below the accounted cursor is never counted twice', async () => {
+  resetLedger()
+  const [bw, payloads] = JSON.parse(await fixture('mainnet-block-1758531.json'))
+  try {
+    m.ledger.through = 1758531
+    assert.equal(m.accountBlock(1758531, payloads, { recipient: bw.addresses[0], net: 'mainnet' }), 'duplicate')
+    assert.equal(m.ledger.recordedBlocks, 0)
+  } finally { resetLedger() }
+})
+
+test('the ledger survives a restart exactly (BigInt strings, no float drift)', async () => {
+  resetLedger()
+  const [bw, payloads] = JSON.parse(await fixture('mainnet-block-1758531.json'))
+  try {
+    for (let i = 0; i < 3; i++) m.accountBlock(1758531 + i * 10, payloads, { recipient: bw.addresses[0], net: 'mainnet' })
+    m.ledger.through = 1758551
+    const doc = JSON.parse(JSON.stringify(m.ledgerDoc()))
+    resetLedger(); m.restoreLedger(doc)
+    assert.equal(m.ledger.recorded, xl1('142.5'))
+    assert.equal(m.ledger.recordedBlocks, 3)
+    assert.equal(m.ledger.fees, xl1('0.0003648'))
+    assert.equal(m.ledger.through, 1758551)
+    assert.equal(m.accountBlock(1758551, payloads, { recipient: bw.addresses[0], net: 'mainnet' }), 'duplicate', 'restored cursor still guards')
+  } finally { resetLedger() }
+})
+
+test('blocks before the ledger are reconstructed only inside one verified era', () => {
+  assert.equal(m.REWARD_ERAS.mainnet(1_721_227, 1_758_000), xl1('47.5'), 'all inside Mainnet step 2')
+  assert.equal(m.REWARD_ERAS.mainnet(999_000, 1_001_000), undefined, 'straddles the 1,000,000 boundary: unknown')
+  assert.equal(m.REWARD_ERAS.sequence(577_263, 669_000), xl1('50'), 'Sequence 10%-share era')
+  assert.equal(m.REWARD_ERAS.sequence(500_000, 669_000), undefined, 'reaches back into the 5%-share era: unknown')
+})
+
+test('rewardsView: per-block from the record, next step, and totals that add up', async () => {
+  resetLedger()
+  const [bw, payloads] = JSON.parse(await fixture('mainnet-block-1758531.json'))
+  try {
+    Object.assign(m.ledger, { preLedgerBlocks: 7000, preLedgerFrom: 1_721_227 })
+    m.accountBlock(1758531, payloads, { recipient: bw.addresses[0], net: 'mainnet' })
+    m.accountBlock(1758540, undefined, { recipient: bw.addresses[0], net: 'mainnet' })
+    const v = m.rewardsView(1_758_600, 'mainnet')
+    assert.deepEqual(v.perBlock, { xl1: '47.5', source: 'recorded', block: 1758531, ofTotalXl1: '475' })
+    assert.equal(v.nextStep.atBlock, 2_000_000); assert.equal(v.nextStep.xl1, '45.125'); assert.equal(v.nextStep.blocksAway, 241_400)
+    assert.equal(v.recorded.xl1, '47.5'); assert.equal(v.estimated.xl1, '47.5')
+    assert.equal(v.reconstructed.xl1, '332500'); assert.equal(v.reconstructed.perBlockXl1, '47.5')
+    assert.equal(v.earned.xl1, '332595', '332,500 + 47.5 + 47.5')
+    assert.equal(v.fees.xl1, '0.0001216')
+  } finally { resetLedger() }
+})
+
+test('rewardsView with no recorded block yet: schedule on Mainnet, nothing on Sequence', () => {
+  resetLedger()
+  try {
+    assert.equal(m.rewardsView(1_758_600, 'mainnet').perBlock.source, 'protocol-schedule')
+    assert.equal(m.rewardsView(669_000, 'sequence').perBlock, undefined, 'no invented Sequence figure')
+  } finally { resetLedger() }
+})
+
+
+test('the API carries derived.rewards without changing existing fields', () => {
+  resetLedger()
+  try {
+    baselineHealthyState()
+    const s = m.snapshot()
+    assert.ok(s.derived && 'rewards' in s.derived, 'derived.rewards present')
+    for (const k of ['rewardPerHour', 'rewardPerDay', 'blocksByWindow']) assert.ok(k in s.derived, `${k} still present`)
+  } finally { resetLedger() }
+})
+
+test('the page carries no hardcoded per-block reward', async () => {
+  const page = await readFile(new URL('../dashboard/index.html', import.meta.url), 'utf8')
+  assert.doesNotMatch(page, /~50 XL1|worthOf\(50\)|pays in fixed 50/, 'per-block reward must come from dv.rewards')
+  assert.match(page, /dv\.rewards/)
+})
+
+// ------------------------------------------------------------ lifetime history
+// 2.3.4: blocks and rewards from before the dashboard began scanning, read from
+// the chain by a bounded walk down to block 1. Synthetic chains below; the
+// real-block fixtures cover parsing.
+const STEP = m.STEP_REWARD_ADDRESS
+const OTHER = 'b'.repeat(40)
+const hx = (x) => x.toString(16)
+// A block signed by `signer` paying `producer` XL1 to `rewardTo` (default: the signer).
+const blk = (n, signer, producer, { rewardTo = signer, payloads = true, fee } = {}) => {
+  const bw = { block: n, addresses: [signer] }
+  if (!payloads) return [bw, undefined]
+  const p = [{ schema: 'network.xyo.transfer', from: '0'.repeat(40), transfers: { [STEP]: hx(xl1(String(producer * 9))), [rewardTo]: hx(xl1(String(producer))) } }]
+  if (fee) p.push({ schema: 'network.xyo.transfer', from: 'c'.repeat(40), transfers: { [rewardTo]: hx(xl1(fee)) } })
+  return [bw, p]
+}
+function historyViewer(chain, { short = new Set() } = {}) {
+  const calls = []
+  return {
+    calls,
+    block: {
+      blocksByNumber: async (to, limit) => {
+        calls.push([to, limit])
+        const out = []
+        for (let n = to; n > to - limit && n >= 1; n--) if (chain.has(n) && !short.has(n)) out.push(chain.get(n))
+        return out
+      },
+    },
+  }
+}
+function resetHistoryState() {
+  const blank = () => ({ blocks: 0, recorded: 0n, recordedBlocks: 0, missing: 0, fees: 0n })
+  Object.assign(m.chainHistory, { scannedFrom: undefined, ledgerSince: undefined, attrSince: undefined, cursor: undefined, done: false, error: undefined, counts: new Map(), attributed: new Map(), self: { preScan: blank(), inScan: blank(), first: undefined }, lastWrite: 0 })
+  m.liveAttributed.clear()
+  Object.assign(m.production, { attrSince: undefined, error: undefined })
+}
+/** Chain 1..N: SELF signs every 5th block; the reward era changes at `era`. */
+function syntheticChain(N, { era = 0, early = 25, late = 50 } = {}) {
+  const c = new Map()
+  for (let n = 1; n <= N; n++) c.set(n, blk(n, n % 5 === 0 ? SELF : OTHER, n < era ? early : late, { fee: n % 5 === 0 ? '0.0001' : undefined }))
+  return c
+}
+async function setup({ N = 1000, scannedFrom = 801, ledgerSince = 901, cursor = 1000, chain = syntheticChain(1000) } = {}) {
+  resetHistoryState(); resetLedger()
+  Object.assign(m.production, { scannedFrom, cursor })
+  m.ledger.since = ledgerSince
+  m.initHistory()
+  return historyViewer(chain)
+}
+const walk = async (viewer, max = 50) => { for (let i = 0; i < max && !m.chainHistory.done; i++) await m.backfillHistory(viewer, m.production.cursor) }
+
+test('attribution excludes the step-reward share and follows the reward address', async () => {
+  const [, payloads] = JSON.parse(await fixture('mainnet-block-1758531.json'))
+  assert.equal(m.attributedReward(payloads), xl1('47.5'), 'the step share (427.5) is not the producer’s')
+  const [, seq] = JSON.parse(await fixture('sequence-block-669230.json'))
+  assert.equal(m.attributedReward(seq), xl1('50'))
+  assert.equal(m.attributedReward([blk(1, OTHER, 50, { rewardTo: 'd'.repeat(40) })[1]].flat()), xl1('50'), 'separate reward address still attributed')
+  assert.equal(m.attributedReward(undefined), undefined)
+})
+
+test('history boundaries: it covers exactly the blocks below the live hand-over', async () => {
+  await setup()
+  assert.equal(m.chainHistory.attrSince, 1001, 'live attribution starts at the next scanned block')
+  assert.equal(m.production.attrSince, 1001)
+  assert.equal(m.chainHistory.cursor, 1000)
+  assert.equal(m.historyBlock(1001, SELF, undefined), 'out-of-range', 'never touches what the live scan attributes')
+})
+
+test('a full walk: pre-scan blocks counted once, in-scan blocks rewarded but not recounted', async () => {
+  const viewer = await setup()
+  await walk(viewer)
+  const h = m.chainHistory
+  assert.equal(h.done, true)
+  // SELF signs every 5th block: 160 below 801 (pre-scan), 20 in 801..900 (in-scan, pre-ledger).
+  assert.equal(h.counts.get(SELF), 160, 'pre-scan count only -- in-scan blocks are already in the live counts')
+  assert.equal(h.self.preScan.blocks, 160)
+  assert.equal(h.self.inScan.blocks, 20)
+  assert.equal(h.self.inScan.recorded, xl1('50') * 20n)
+  assert.equal(h.self.preScan.fees, xl1('0.0001') * 160n)
+  assert.equal(h.self.first, 5)
+  // Blocks >= ledgerSince belong to the 2.3.3 ledger and are not in the self buckets.
+  assert.equal(h.self.preScan.blocks + h.self.inScan.blocks, 180)
+})
+
+test('historical eras are taken from each block, never today’s rate', async () => {
+  const viewer = await setup({ chain: syntheticChain(1000, { era: 400 }) })
+  await walk(viewer)
+  const pre = m.chainHistory.self.preScan
+  // SELF blocks below 400: 79 at 25 XL1; 400..800: 81 at 50 XL1.
+  assert.equal(pre.recorded, xl1('25') * 79n + xl1('50') * 81n)
+})
+
+test('a partial gateway answer never advances the checkpoint past the missing block', async () => {
+  resetHistoryState(); resetLedger()
+  Object.assign(m.production, { scannedFrom: 801, cursor: 1000 }); m.ledger.since = 901; m.initHistory()
+  const viewer = historyViewer(syntheticChain(1000), { short: new Set([950]) })
+  await m.backfillHistory(viewer, 1000)
+  // Smaller batches read 951..1000 completely; block 950 itself is missing at every size.
+  assert.equal(m.chainHistory.cursor, 950, 'the walk stops exactly above the hole and never passes it')
+  assert.match(m.chainHistory.error, /even at the smallest batch/)
+  assert.equal(m.chainHistory.self.inScan.blocks, 0, 'nothing below the hole was counted')
+})
+
+test('an interrupted walk resumes from its checkpoint with no block counted twice', async () => {
+  const chain = syntheticChain(1000)
+  let viewer = await setup({ chain })
+  await m.backfillHistory(viewer, 1000) // two batches: 601..1000
+  const saved = JSON.parse(JSON.stringify(m.historyDoc()))
+  assert.equal(saved.cursor, 600)
+  // "restart"
+  resetHistoryState()
+  assert.equal(m.restoreHistory(saved), true)
+  Object.assign(m.production, { attrSince: m.chainHistory.attrSince })
+  viewer = historyViewer(chain)
+  await walk(viewer)
+  assert.equal(m.chainHistory.done, true)
+  assert.equal(m.chainHistory.counts.get(SELF), 160, 'same totals as an uninterrupted walk')
+  assert.equal(m.chainHistory.self.inScan.blocks, 20)
+  assert.equal(viewer.calls[0][0], 600, 'resumed exactly below the checkpoint')
+})
+
+test('blocks without payloads are counted as unrecorded, never priced', async () => {
+  const chain = syntheticChain(1000)
+  chain.set(500, blk(500, SELF, 50, { payloads: false }))
+  const viewer = await setup({ chain })
+  await walk(viewer)
+  assert.equal(m.chainHistory.self.preScan.missing, 1)
+  assert.equal(m.chainHistory.self.preScan.recordedBlocks, 159)
+})
+
+test('live attribution starts at the hand-over block and never overlaps the history', async () => {
+  const viewer = await setup()
+  await walk(viewer)
+  // Live scan: blocks 1001..1005 attributed live; anything below attrSince is history's.
+  for (let n = 996; n <= 1005; n++) {
+    const [bw, p] = blk(n, n % 5 === 0 ? SELF : OTHER, 50)
+    if (m.production.attrSince !== undefined && n >= m.production.attrSince) {
+      const a = m.attributedReward(p); m.liveAttributed.set(bw.addresses[0], (m.liveAttributed.get(bw.addresses[0]) ?? 0n) + a)
+    }
+  }
+  assert.equal(m.liveAttributed.get(SELF), xl1('50'), 'only block 1005 is live')
+  assert.equal(m.chainHistory.attributed.get(SELF), xl1('50') * 200n, 'history: every SELF block below 1001')
+})
+
+test('rewardsView: no lifetime claim until the walk reaches block 1', async () => {
+  const viewer = await setup()
+  m.peers.set(SELF, 40) // live counts since scannedFrom (801..1000: 40 SELF blocks)
+  m.ledger.recordedBlocks = 20 // the ledger's own blocks, 901..1000
+  try {
+    await m.backfillHistory(viewer, 1000)
+    let v = m.rewardsView(1000, 'sequence')
+    assert.equal(v.history.coverage, 'partial')
+    assert.equal(v.lifetime, undefined, 'a partial history is never labelled lifetime')
+    await walk(viewer)
+    v = m.rewardsView(1000, 'sequence')
+    assert.equal(v.history.coverage, 'complete'); assert.equal(v.history.percent, 100)
+    assert.equal(v.lifetime.blocks, 200, '160 pre-scan + 20 in-scan + 20 in the ledger, all read from the chain')
+    assert.equal(v.lifetime.liveCounterBlocks, 200, 'the live counter agrees here')
+    assert.equal(v.lifetime.firstBlock, 5)
+    assert.equal(v.lifetime.basis, 'chain records from block 1')
+    assert.equal(v.inScanRecorded.blocks, 20, 'in-scan rewards read from the chain')
+    assert.equal(v.reconstructed, undefined, 'and they replace the reconstruction')
+  } finally { m.peers.delete(SELF); resetLedger() }
+})
+
+test('lifetime blocks come from chain-read counts, not a live counter that over-counted', async () => {
+  const viewer = await setup()
+  m.peers.set(SELF, 42) // two more than the chain shows (the pre-2.3.5 overlap)
+  m.ledger.recordedBlocks = 20
+  try {
+    await walk(viewer)
+    const v = m.rewardsView(1000, 'sequence')
+    assert.equal(v.lifetime.blocks, 200, 'chain-read: 160 + 20 + 20')
+    assert.equal(v.lifetime.liveCounterBlocks, 202, 'the live counter is shown beside it, not used')
+  } finally { m.peers.delete(SELF); resetLedger() }
+})
+
+test('the all-time own total drops the chain-proven duplicates in the live counter, and nothing else', async () => {
+  const viewer = await setup()
+  m.peers.set(SELF, 42) // the live counter: two more than the chain shows (the pre-2.3.5 overlap)
+  m.ledger.recordedBlocks = 20
+  m.ledger.preLedgerBlocks = 22 // the live scan counted 22 own blocks in the scanned range; the chain holds 20
+  try {
+    assert.equal(m.selfOvercount(), 0, 'no correction before the walk has read the scanned range')
+    assert.equal(m.peerBoard().self.blocks, 42)
+    await walk(viewer)
+    assert.equal(m.selfOvercount(), 2, 'the difference is exactly what the chain disproves')
+    const board = m.peerBoard()
+    assert.equal(board.self.blocks, 40, 'the all-time standing shows the chain-verified count')
+    assert.equal(m.rewardsView(1000, 'sequence').lifetime.blocks, 200, 'and agrees with lifetime: 160 pre-scan + 40 since')
+    assert.equal(m.peers.get(SELF), 42, 'the stored counter is not rewritten')
+    assert.equal(m.rewardsView(1000, 'sequence').lifetime.liveCounterBlocks, 202, 'the raw counter stays visible as such')
+    assert.equal(m.publicView(board).producer.blocks.total, 40, 'the public total agrees with the verified record')
+    m.ledger.preLedgerBlocks = 19 // a live count BELOW the chain is missed blocks, not duplicates
+    assert.equal(m.selfOvercount(), 0, 'never corrected upward')
+    assert.equal(m.peerBoard().self.blocks, 42)
+  } finally { m.peers.delete(SELF); resetLedger() }
+})
+
+test('the public rewards projection: own record only, labelled, checkable', async () => {
+  const viewer = await setup()
+  m.peers.set(SELF, 40); m.ledger.recordedBlocks = 20
+  try {
+    await m.backfillHistory(viewer, 1000)
+    let pub = m.publicView(m.peerBoard()).rewards
+    assert.ok(pub, 'rewards are published')
+    assert.equal(pub.lifetime, undefined, 'no lifetime while the walk is partial')
+    assert.equal(pub.history.coverage, 'partial')
+    assert.match(pub.evidence.blockFile, /^https:\/\/blocks\.(mainnet|sequence)\.xyo\.space\/block\/number\/\{n\}\.json$/)
+    assert.equal(pub.evidence.method, 'https://oxyon.io/xl1/about-data/#rewards')
+    m.chainHistory.error = 'CANARY-GATEWAY-ERROR http://10.0.0.9'
+    await walk(viewer)
+    pub = m.publicView(m.peerBoard()).rewards
+    const text = JSON.stringify(pub)
+    assert.equal(pub.lifetime.blocks, 200, 'lifetime appears once the walk reaches block 1')
+    assert.equal('lifetimeSigners' in pub, false, 'other producers\' totals are not published')
+    assert.equal('recipient' in pub, false)
+    assert.equal(text.includes('CANARY-GATEWAY-ERROR'), false, 'error text never leaves the house')
+    assert.equal(pub.recorded.since !== undefined || pub.recorded.blocks !== undefined, true, 'recorded keeps its label')
+    if (pub.nextStep) assert.equal(pub.nextStep.status, 'projection')
+  } finally { m.peers.delete(SELF); resetLedger(); m.chainHistory.error = undefined }
+})
+
+test('rewardsView reports a disagreement between history and the live count', async () => {
+  const viewer = await setup()
+  m.ledger.preLedgerBlocks = 21 // the live scan claims one more in-scan block than the chain shows
+  try {
+    await walk(viewer)
+    assert.match(m.rewardsView(1000, 'sequence').inScanRecorded.discrepancy, /history found 20 own blocks where the live scan counted 21/)
+  } finally { resetLedger() }
+})
+
+test('lifetime recorded and the independent attribution agree', async () => {
+  const viewer = await setup()
+  m.peers.set(SELF, 40)
+  try {
+    await walk(viewer)
+    // Ledger (>= 901) as the live scan would have recorded it: 20 SELF blocks.
+    m.ledger.recorded = xl1('50') * 20n; m.ledger.recordedBlocks = 20
+    const v = m.rewardsView(1000, 'sequence')
+    assert.equal(v.lifetime.recordedXl1, String(50 * 200))
+    assert.equal(v.lifetime.attributedXl1, String(50 * 200), 'two methods, one answer')
+  } finally { m.peers.delete(SELF); resetLedger() }
+})
+
+test('history checkpoints survive JSON exactly (BigInt strings)', async () => {
+  const viewer = await setup()
+  await walk(viewer)
+  const doc = JSON.parse(JSON.stringify(m.historyDoc()))
+  const before = m.chainHistory.self.preScan.fees
+  resetHistoryState(); m.restoreHistory(doc)
+  assert.equal(m.chainHistory.self.preScan.fees, before)
+  assert.equal(m.chainHistory.done, true)
+  assert.equal(m.restoreHistory({ v: 3 }), false, 'an unknown version is refused')
+})
+
+test('overlapping walk steps never count a batch twice (a slow poll overlapping the next)', async () => {
+  const chain = syntheticChain(1000)
+  await setup({ chain })
+  const fast = historyViewer(chain)
+  // A gateway slow enough that the next 15 s tick starts while this one waits.
+  const slow = { calls: fast.calls, block: { blocksByNumber: async (to, limit) => { await new Promise((r) => setTimeout(r, 20)); return fast.block.blocksByNumber(to, limit) } } }
+  for (let i = 0; i < 50 && !m.chainHistory.done; i++) await Promise.all([m.backfillHistory(slow, 1000), m.backfillHistory(slow, 1000), m.backfillHistory(slow, 1000)])
+  assert.equal(m.chainHistory.done, true)
+  assert.equal(m.chainHistory.counts.get(SELF), 160, 'pre-scan count identical to a single walker')
+  assert.equal(m.chainHistory.self.inScan.blocks, 20, 'in-scan count identical to a single walker')
+  assert.equal(m.chainHistory.self.preScan.blocks, 160)
+})
+
+test('the chain poll is single-flight: a tick that finds the last one still running is skipped', async () => {
+  let running = 0, peak = 0, runs = 0
+  const tick = m.singleFlight(async () => { runs++; running++; peak = Math.max(peak, running); await new Promise((r) => setTimeout(r, 20)); running-- })
+  await Promise.all([tick(), tick(), tick()])
+  assert.equal(peak, 1, 'never two at once')
+  assert.equal(runs, 1, 'overlapping ticks are dropped, not queued')
+  await tick()
+  assert.equal(runs, 2, 'the next tick after it finished runs normally')
+})
+
+test('a 2.3.4 (v1) history file is discarded, and the walk restarts from the saved hand-over', async () => {
+  const chain = syntheticChain(1000)
+  let viewer = await setup({ chain })
+  await m.backfillHistory(viewer, 1000)
+  const v1 = { ...JSON.parse(JSON.stringify(m.historyDoc())), v: 1 }
+  resetHistoryState()
+  assert.equal(m.restoreHistory(v1), false, 'v1 may hold double-counted batches')
+  Object.assign(m.production, { attrSince: 1001 }) // persisted in peers.json
+  m.initHistory()
+  assert.equal(m.chainHistory.attrSince, 1001, 'same hand-over: nothing attributed twice')
+  assert.equal(m.chainHistory.cursor, 1000, 'walk restarts from just below it')
+  viewer = historyViewer(chain)
+  await walk(viewer)
+  assert.equal(m.chainHistory.counts.get(SELF), 160)
+  assert.equal(m.chainHistory.self.inScan.blocks, 20)
+  assert.equal(m.restoreHistory(JSON.parse(JSON.stringify(m.historyDoc()))), true, 'its own format still restores')
+})
+
+test('a range the gateway truncates at full size is walked in smaller batches, still complete and counted once', async () => {
+  const chain = syntheticChain(1000)
+  await setup({ chain })
+  const base = historyViewer(chain)
+  // Like the real gateway: a request that spans block 950 stops at 951 and returns only the newer part,
+  // unless the batch is small (<= 50); everything else is answered in full.
+  const calls = []
+  const truncating = { calls, block: { blocksByNumber: async (to, limit) => {
+    calls.push([to, limit])
+    const out = await base.block.blocksByNumber(to, limit)
+    const lowest = to - limit + 1
+    return (lowest <= 950 && to > 950 && limit > 50) ? out.filter((e) => e[0].block > 950) : out
+  } } }
+  await walk(truncating, 80)
+  assert.equal(m.chainHistory.done, true, 'the walk gets past the truncating range instead of retrying forever')
+  assert.equal(m.chainHistory.error, undefined)
+  assert.equal(m.chainHistory.counts.get(SELF), 160, 'pre-scan count unchanged')
+  assert.equal(m.chainHistory.self.inScan.blocks, 20, 'in-scan count unchanged: nothing skipped, nothing doubled')
+  assert.ok(calls.some(([, l]) => l <= 50), 'it fell back to a smaller batch')
+})
+
+test('a batch still partial at the smallest size is retried, never skipped', async () => {
+  const chain = syntheticChain(1000)
+  await setup({ chain })
+  const viewer = historyViewer(chain, { short: new Set([995]) }) // missing at every size
+  await m.backfillHistory(viewer, 1000)
+  assert.equal(m.chainHistory.cursor, 1000, 'the checkpoint did not move past the hole')
+  assert.match(m.chainHistory.error, /even at the smallest batch/)
+})
+
+// ------------------------------------------------------------- time payload
+//
+// The wait on Ethereum before every candidate. On 2026-10-22 it hung for 15-140 s
+// at a time and every other card on this page stayed green.
+
+const NOW = Date.parse('2026-10-22T22:00:00Z')
+const tpRow = (minsAgo, ms, rejected = 0) => [1_000_000 + minsAgo, NOW - minsAgo * 60_000, 0, 0, rejected, ms]
+
+test('a payload summary covers the last hour of builds and nothing older', () => {
+  const rows = [tpRow(90, 99_000), tpRow(50, 300), tpRow(40, 400), tpRow(30, 5_000, 1), tpRow(20, null), tpRow(10, 200)]
+  const s = m.payloadSummary({ rows }, { host: 'eth.drpc.org' }, NOW)
+  assert.equal(s.builds, 5, 'the 90-minute-old build is outside the window')
+  assert.equal(s.measured, 4, 'a build with no payload line is counted as built, not as measured')
+  assert.equal(s.p50Ms, 400)
+  assert.equal(s.maxMs, 5_000)
+  assert.equal(s.slow, 1)
+  assert.equal(s.rejected, 1)
+  assert.deepEqual(s.endpoint, { host: 'eth.drpc.org', configured: true })
+})
+
+test('a payload summary of nothing is zeroes and blanks, never a throw', () => {
+  for (const h of [undefined, null, {}, { rows: 'x' }, { rows: [null, 'a', [1, null, 0, 0, 0, 5]] }]) {
+    const s = m.payloadSummary(h, undefined, NOW)
+    assert.equal(s.measured, 0)
+    assert.equal(s.p50Ms, undefined)
+    assert.deepEqual(s.endpoint, { host: null, configured: false }, 'no host is the image default')
+  }
+})
+
+test('only a plain hostname survives as the endpoint', () => {
+  for (const bad of ['https://eth.drpc.org', 'eth-mainnet.g.alchemy.com/v2/KEY', 'a b', '', 42, { x: 1 }]) {
+    assert.equal(m.evmEndpoint({ host: bad }).host, null, `rejected: ${JSON.stringify(bad)}`)
+  }
+  assert.equal(m.evmEndpoint({ host: 'ETH.drpc.ORG' }).host, 'eth.drpc.org')
+})
+
+test('slow payloads page only when they are a real share of enough builds', () => {
+  const prev = m.state.node
+  try {
+    const slowRows = Array.from({ length: 30 }, (_, i) => tpRow(i + 1, i < 7 ? 20_000 : 300))
+    m.state.node = { ok: true, heights: { rows: slowRows }, evmRpc: { host: null } }
+    let v = m.timePayloadView(NOW)
+    assert.equal(v.producers.length, 1)
+    assert.equal(v.producers[0].id, 'self')
+    assert.equal(v.alerts.length, 1, '7 of 30 is over one in five')
+    assert.match(v.alerts[0], /^this producer: 7 of 30 time payloads over 3 s in the last hour \(Ethereum RPC image default\)$/)
+
+    // Two slow out of five builds is a bigger share and still not enough to page on.
+    m.state.node = { ok: true, heights: { rows: [tpRow(1, 9_000), tpRow(2, 9_000), tpRow(3, 300), tpRow(4, 300), tpRow(5, 300)] } }
+    assert.deepEqual(m.timePayloadView(NOW).alerts, [])
+
+    // Every producer the collector reports, each under its own name and endpoint.
+    m.state.node = { ok: true, localProducers: [
+      { id: 'main-cc91', network: 'mainnet', evmRpc: { host: 'eth.drpc.org' }, heights: { rows: Array.from({ length: 25 }, (_, i) => tpRow(i + 1, 280)) } },
+      { id: 'main-653e', network: 'mainnet', evmRpc: { host: null }, heights: { rows: slowRows } },
+    ] }
+    v = m.timePayloadView(NOW)
+    assert.deepEqual(v.producers.map((p) => p.id), ['main-cc91', 'main-653e'])
+    assert.equal(v.alerts.length, 1)
+    assert.match(v.alerts[0], /^main-653e: /)
+    assert.equal('hasRows' in v.producers[0], false, 'internal bookkeeping is not published')
+
+    // A collector too old to write height rows: no card, rather than a card of zeroes.
+    m.state.node = { ok: true, container: { running: true } }
+    assert.equal(m.timePayloadView(NOW), undefined)
+    m.state.node = { ok: false, error: 'x' }
+    assert.equal(m.timePayloadView(NOW), undefined)
+  } finally {
+    m.state.node = prev
+  }
+})
+
+test('the status document carries the payload view for the alerter', () => {
+  const prev = m.state.node
+  try {
+    m.state.node = { ok: true, stale: false, container: { running: true }, heights: { rows: [tpRow(1, 300)] } }
+    const s = m.snapshot()
+    assert.ok(Array.isArray(s.timePayload?.producers))
+    assert.deepEqual(s.timePayload.alerts, [])
+  } finally {
+    m.state.node = prev
+  }
+})
+
+test('a peer\'s producers are listed under it, with only the fields the card draws', () => {
+  const addr = 'a9304753eade52dd22b1a6fc519b571a4dc2653e'
+  const list = m.fleetProducers({
+    chain: { network: 'sequence' },
+    peers: { top: [{ address: '2152e6aec996742fb6e52ae1aad87bd44f2ccc91', blocks: 50, sharePercent: 12.5, rank: 2, label: 'LewSales-2' }] },
+    timePayload: { producers: [{ id: 'main-653e', p50Ms: 360, slow: 2, measured: 40, endpoint: { host: 'eth.drpc.org' } }] },
+    node: { localProducers: [
+      { id: 'node', network: 'sequence', rewardAddress: '2152e6aec996742fb6e52ae1aad87bd44f2ccc91', running: true, builds: 120, heights: { rows: [[1, 2, 3]] }, mnemonic: 'never' },
+      { id: 'main-653e', network: 'mainnet', rewardAddress: addr, running: false, builds: 300, timePayloadP50Ms: 999 },
+      { id: 'x', rewardAddress: 'not-hex' },
+      null,
+    ] },
+  })
+  assert.equal(list.length, 3, 'non-objects are dropped')
+  assert.equal(list[0].label, 'LewSales-2', 'standing from the peer, for a producer on the peer\'s own chain')
+  assert.equal(list[0].rank, 2)
+  assert.equal(list[0].heights, undefined, 'no height rows travel between dashboards')
+  assert.equal(list[0].mnemonic, undefined)
+  assert.equal(list[1].rank, undefined, 'the peer cannot rank a producer on a chain it does not scan')
+  assert.equal(list[1].running, false)
+  assert.equal(list[1].payloadP50Ms, 360, 'the payload view wins over the older single figure')
+  assert.equal(list[1].evmHost, 'eth.drpc.org')
+  assert.equal(list[2].address, undefined, 'a malformed address is not passed on')
+  assert.equal(m.fleetProducers({ node: {} }), undefined)
+  // fleetSummary carries the list.
+  assert.equal(m.fleetSummary({ node: { localProducers: [{ id: 'a' }] } }).localProducers.length, 1)
 })
