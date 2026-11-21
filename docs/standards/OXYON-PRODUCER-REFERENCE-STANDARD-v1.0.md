@@ -370,7 +370,7 @@ A dated record of one operator's choices, given for transparency, **not as recom
 | Image | `xl1:5.6.2`: CLI 5.6.2, Node 24.14.1 (since 2026-10-11; 5.6.1 kept for rollback) | `xl1:5.6.2`: CLI 5.6.2, Node 26.9.0, all three containers (since 2026-10-11) |
 | Containers | 1: Mainnet | 3: one Sequence (main), one Sequence (extra), one Mainnet (extra) |
 | Role | `producer-rest` | `producer-rest` |
-| `blockProductionCheckInterval` | 3000 (selected; trial since 2026-09-27) | **3000 (selected 2026-10-10)** |
+| `blockProductionCheckInterval` | 3000 (selected; trial since 2026-09-27) | **500 (selected 2026-11-21; 3000 from 2026-10-10)** |
 | `heartbeatInterval` | 60000 (upstream value) | 60000 |
 | Heap cap | `--max-old-space-size=512` | none (16 GB host) |
 | Logs | rotated 10 MB × 3 | producers not yet rotated (Baseline gap, see below) |
