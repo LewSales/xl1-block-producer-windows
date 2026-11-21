@@ -408,7 +408,7 @@ switch ($Command) {
     # `docker compose` by hand can do by passing one -f instead of two -- and
     # the mounts vanish silently. The producer then falls back to the presets
     # baked into the image, and the image ships
-    # blockProductionCheckInterval: 60000 where this repo sets 3000.
+    # blockProductionCheckInterval: 60000 where this repo sets 500.
     #
     # Nothing about that looks wrong. The container runs, /livez passes, the
     # health check is green, blocks are still produced -- just far less

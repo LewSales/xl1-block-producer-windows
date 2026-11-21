@@ -21,16 +21,16 @@ import { execFileSync } from 'node:child_process'
 const root = join(fileURLToPath(new URL('.', import.meta.url)), '..')
 const preset = (name) => JSON.parse(readFileSync(join(root, 'presets', 'roles', name), 'utf8'))
 
-// The range with evidence behind it: 3000 is the lowest value either node has
-// run (2026-09-27 trial), 60000 is the image default. Anything outside needs
-// a measurement first, not a test edit.
-const INTERVAL_MIN = 3000
+// The range with evidence behind it: 500 is what XYO's own leading homelab producer
+// runs (Arie Trouw, 2026-11-20) and what our mainnet nodes have run since then;
+// 60000 is the image default. Anything outside needs a measurement first, not a test edit.
+const INTERVAL_MIN = 500
 const INTERVAL_MAX = 60000
 
 // The value selected for this Windows host (decision of 2026-10-10). A change
 // is a decision with its own evidence: update this, the presets, and the
 // "Selected configuration" record in docs/standards together.
-const SELECTED_INTERVAL = 3000
+const SELECTED_INTERVAL = 500 // owner decision 2026-11-21 (was 3000 from 2026-10-10)
 
 // Bindings each role must keep. BlockRunner/BlockValidationViewer on memory are
 // upstream's own values; the rest must point at the network, never a local store.
