@@ -14,9 +14,9 @@
   networks are separate chains, so a key never competes with itself. The rule
   that keeps that true: never two producers with one key on the SAME network.
 
-  The extras run their own image tag (xl1:5.8.0 since 2026-11-21 for all three
-  pair; build it with Build.ps1 -CliVersion 5.8.0 -ProducerOnly, which also tags
-  xl1:5.8.0) so a Build.ps1 run, which retags xl1:local, never
+  The extras run their own image tag (xl1:5.8.1 since 2026-11-22 for all three
+  pair; build it with Build.ps1 -CliVersion 5.8.1 -ProducerOnly, which also tags
+  xl1:5.8.1) so a Build.ps1 run, which retags xl1:local, never
   changes them by accident. Change this default only together with an upgrade:
   `up` without -Image recreates onto whatever it names.
 
@@ -35,7 +35,7 @@
 [CmdletBinding()]
 param(
   [ValidateSet('up', 'down', 'status')][string]$Action = 'status',
-  [string]$Image = 'xl1:5.8.0',
+  [string]$Image = 'xl1:5.8.1',
   [ValidateSet('xl1-seq-23b3', 'xl1-main-cc91', 'xl1-main-653e')][string]$Only
 )
 
