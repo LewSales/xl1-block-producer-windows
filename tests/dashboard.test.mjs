@@ -1624,6 +1624,10 @@ test('nothing that identifies the machine survives the projection', () => {
   for (const key of ['system', 'node', 'alerts', 'fleet', 'health', 'history', 'problems']) {
     assert.equal(key in pub, false, `\`${key}\` must not be published`)
   }
+  // Host health IS published since 2026-11-26 (owner decision), but only as the
+  // rounded, named figures of hostPublicView/softwareView: the canaries above cover them too.
+  assert.deepEqual(Object.keys(pub.host).sort(), ['cpuCount', 'cpuPercent', 'cpuTempC', 'diskPercent', 'load1', 'memoryPercent', 'os', 'platform', 'swapPercent', 'throttle', 'uptimeHours'])
+  assert.equal(pub.software.cli, '5.3.2')
   // `trend` IS published, but only as daily aggregates. The raw store carries a
   // sample every five minutes with CPU temperature and memory in it, and none of
   // that describes the chain.
@@ -2535,4 +2539,61 @@ test('a peer\'s producers are listed under it, with only the fields the card dra
   assert.equal(m.fleetProducers({ node: {} }), undefined)
   // fleetSummary carries the list.
   assert.equal(m.fleetSummary({ node: { localProducers: [{ id: 'a' }] } }).localProducers.length, 1)
+})
+
+// ---- producer surfaces: one contract for dashboard, Pi panel and oxyon.io ----
+test('standing: API v1 producer document → the rank every surface leads with', () => {
+  const addr = 'ca08120874f071739d932b24da41cc13299123b3'
+  const doc = {
+    meta: { schema: 'oxyon.xl1.api.producer.v1', apiVersion: 1, net: 'mainnet', generatedAt: 1795665743883 },
+    address: addr, isProducer: true, last: { n: 2199409, epoch: 1795665667386 },
+    windows: { '1h': { blocks: 32, total: 482, share: 0.0664, rank: 10, of: 11 }, '24h': { blocks: 444, total: 6303, share: 0.0704, rank: 9, of: 11 }, '7d': { blocks: 7213, total: 71637, share: 0.1007, rank: 3, of: 11 } },
+    meanGapMs: 107174, streaks: { current: 0 },
+  }
+  const s = m.standingView(doc, 'mainnet', addr)
+  assert.deepEqual(s.windows['1h'], { blocks: 32, total: 482, sharePercent: 6.64, rank: 10, of: 11 })
+  assert.equal(s.windows['7d'].rank, 3)
+  assert.equal(s.lastWin.n, 2199409)
+  assert.throws(() => m.standingView(doc, 'sequence', addr), /another producer or network/)
+  assert.throws(() => m.standingView({ ...doc, address: '00'.repeat(20) }, 'mainnet', addr), /another producer/)
+  assert.throws(() => m.standingView({ ...doc, meta: { ...doc.meta, schema: 'x' } }, 'mainnet', addr), /unsupported/)
+})
+
+test('software: version, lag against the manifest, and the interval the running producer loaded', () => {
+  m.state.node = { ok: true, cliVersion: '5.8.2', producerConfig: { interval: 400, role: 'producer-rest', startedAt: '2026-11-26T05:19:42Z' } }
+  m.state.release = { ok: true, latest: '5.8.4' }
+  const s = m.softwareView()
+  assert.equal(s.cli, '5.8.2'); assert.equal(s.cliLatest, '5.8.4'); assert.equal(s.cliLag, 'behind')
+  assert.equal(s.interval, 400); assert.equal(s.role, 'producer-rest')
+  m.state.node = { ok: true, producerConfig: { interval: '400; rm -rf /' } }
+  assert.equal(m.softwareView().interval, null, 'only an integer interval is passed on')
+})
+
+test('public host view: rounded figures only — no hostname, IP or path ever leaves', () => {
+  m.state.system = { ok: true, hostname: 'xl1pi', uptimeSeconds: 275519, cpuCount: 4, cpuPercent: 23.46, loadAverage: [0.38, 0.4, 0.44], cpuTempC: 58.4,
+    throttle: { healthy: true, undervoltageNow: false, throttledNow: false, frequencyCappedNow: false, softTempLimitNow: false, undervoltageSinceBoot: true },
+    memory: { usedPercent: 62 }, swap: { usedPercent: 2 }, disk: { usedPercent: 40 } }
+  m.state.node = { ok: true, os: { updates: 1, securityUpdates: 0, rebootRequired: true, aptAgeHours: 5.43 }, host: { hostname: 'LEWSALES-LAPTOP' } }
+  const h = m.hostPublicView()
+  assert.equal(h.uptimeHours, 76); assert.equal(h.cpuPercent, 23); assert.equal(h.cpuTempC, 58)
+  assert.deepEqual(h.throttle, { healthy: true, now: [], sinceBoot: ['undervoltage'] })
+  assert.deepEqual(h.os, { updates: 1, securityUpdates: 0, rebootRequired: true, checkedHoursAgo: 5.4 })
+  const text = JSON.stringify(h)
+  for (const secret of ['xl1pi', 'LEWSALES', '192.168', '100.74', '/var/', 'C:\\']) assert.ok(!text.includes(secret), `public host view leaked ${secret}`)
+})
+
+test('public fleet view: each local producer with its network and interval, nothing else', () => {
+  m.state.node = { ok: true, localProducers: [
+    { address: 'A9304753EADE52DD22B1A6FC519B571A4DC2653E', network: 'mainnet', label: 'Oxyon · Windows 2', cliVersion: '5.8.2', interval: 400, role: 'producer-rest', startedAt: '2026-11-26T03:47:10Z', health: 'healthy', envFile: 'C:\secret.env', heights: { rows: [] } },
+    { network: 'sequence' },
+    { id: 'seq-23b3', rewardAddress: 'ca08120874f071739d932b24da41cc13299123b3', network: 'sequence', running: true, state: 'running', interval: 400, cliVersion: '5.8.2' },
+  ] }
+  const f = m.fleetPublicView()
+  assert.equal(f.length, 2, 'rows without an address are dropped')
+  assert.deepEqual([f[1].label, f[1].address.slice(0, 4), f[1].health, f[1].interval], ['seq-23b3', 'ca08', 'running', 400], 'the collector row shape (id, rewardAddress, running) maps too')
+  assert.equal(f[0].address, 'a9304753eade52dd22b1a6fc519b571a4dc2653e')
+  assert.equal(f[0].interval, 400)
+  assert.ok(!('envFile' in f[0]) && !('heights' in f[0]))
+  m.state.node = { ok: true }
+  assert.equal(m.fleetPublicView(), undefined)
 })

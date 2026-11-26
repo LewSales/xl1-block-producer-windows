@@ -2787,6 +2787,7 @@ async function pollSystem() {
       ok: true,
       hostname: os.hostname(),
       uptimeSeconds: Math.round(os.uptime()),
+      cpuPercent: cpuPercentSinceLast(),
       loadAverage: os.loadavg().map((n) => Number(n.toFixed(2))),
       cpuCount: os.cpus().length,
       cpuTempC: tempRaw ? Number((Number(tempRaw) / 1000).toFixed(1)) : undefined,
@@ -2958,6 +2959,132 @@ function eligibilityVerdict(node = state.node, ev = chainEvidence(), now = Date.
  *  marked eligibilityIgnored, so the alerter (which reads it) pages only on
  *  `unconfirmed` and `unverified`, and its message carries the evidence. The
  *  alerter's own not-producing and producer-down checks cover the rest. */
+// ------------------------------------------------- standing, software, host
+// One producer, five screens (dashboard, oxyon.io page, Pi panel): they must lead
+// with the same rank. That rank is this producer's 1 h / 24 h / 7 d standing as
+// Oxyon's public API v1 computes it, so the dashboard, the Pi panel and
+// oxyon.io/xl1 cannot disagree. The lifetime rank from this node's own scan is
+// still shown, second and labelled.
+const STANDING_URL = envStr('DASH_STANDING_URL', 'https://oxyon.io/api/xl1/v1').replace(/\/+$/, '')
+const STANDING_POLL_MS = envNum('DASH_STANDING_POLL_MS', 60_000)
+const STANDING_SCHEMA = 'oxyon.xl1.api.producer.v1'
+const STANDING_WINDOWS = ['1h', '24h', '7d']
+
+/** The API v1 producer document reduced to what every surface shows. Pure, for tests. */
+function standingView(doc, net, address) {
+  const meta = doc?.meta
+  if (meta?.schema !== STANDING_SCHEMA || meta?.apiVersion !== 1) throw new Error('unsupported standing format')
+  if (meta.net !== net || String(doc.address ?? '').toLowerCase() !== address) throw new Error('standing answered for another producer or network')
+  const windows = {}
+  for (const w of STANDING_WINDOWS) {
+    const x = doc.windows?.[w]
+    if (!x) continue
+    windows[w] = {
+      blocks: Number.isSafeInteger(x.blocks) ? x.blocks : null,
+      total: Number.isSafeInteger(x.total) ? x.total : null,
+      sharePercent: Number.isFinite(x.share) ? Number((x.share * 100).toFixed(2)) : null,
+      rank: Number.isSafeInteger(x.rank) ? x.rank : null,
+      of: Number.isSafeInteger(x.of) ? x.of : null,
+    }
+  }
+  return {
+    source: `${STANDING_URL}/${net}/producer/${address}`,
+    generatedAt: Number.isFinite(meta.generatedAt) ? new Date(meta.generatedAt).toISOString() : null,
+    isProducer: Boolean(doc.isProducer),
+    windows,
+    lastWin: doc.last && Number.isSafeInteger(doc.last.n) ? { n: doc.last.n, at: Number.isFinite(doc.last.epoch) ? new Date(doc.last.epoch).toISOString() : null } : null,
+    meanGapMs: Number.isFinite(doc.meanGapMs) ? doc.meanGapMs : null,
+    streak: Number.isSafeInteger(doc.streaks?.current) ? doc.streaks.current : null,
+  }
+}
+
+async function pollStanding() {
+  const address = PRODUCER_ADDRESS || REWARD_ADDRESS
+  if (!STANDING_URL || !address) { state.standing = { ok: false, disabled: true }; return }
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 8000)
+  try {
+    const res = await fetch(`${STANDING_URL}/${encodeURIComponent(NETWORK)}/producer/${address}`, { signal: controller.signal, headers: { accept: 'application/json' } })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    state.standing = { ok: true, ...standingView(await res.json(), NETWORK, address), polledAt: new Date().toISOString() }
+  } catch (error) {
+    // Keep the last good reading, marked, rather than blanking every screen on one failed poll.
+    const prev = state.standing?.ok || state.standing?.stale ? state.standing : null
+    state.standing = prev
+      ? { ...prev, ok: false, stale: true, error: String(error?.message ?? error).slice(0, 120) }
+      : { ok: false, error: String(error?.message ?? error).slice(0, 120) }
+  } finally { clearTimeout(timer) }
+}
+
+/** What runs here and whether it is current: the fact a visitor checks first. */
+function softwareView() {
+  const n = state.node ?? {}, pc = n.producerConfig ?? {}
+  return {
+    cli: n.cliVersion ?? null,
+    cliLatest: state.release?.latest ?? null,
+    cliLag: versionLag(n.cliVersion, state.release?.latest) ?? null,
+    dashboard: BUILD_STAMP.version ?? DASH_VERSION,
+    interval: Number.isSafeInteger(pc.interval) ? pc.interval : null,
+    role: typeof pc.role === 'string' ? pc.role : null,
+    producerStartedAt: typeof pc.startedAt === 'string' ? pc.startedAt : null,
+  }
+}
+
+const THROTTLE_FLAGS = ['undervoltage', 'frequencyCapped', 'throttled', 'softTempLimit']
+/** Host health for the public page: rounded figures only. No hostname, path, IP or kernel string. */
+function hostPublicView() {
+  const s = state.system ?? {}, o = state.node?.os
+  const pct = (v) => (Number.isFinite(v) ? Math.round(v) : null)
+  const t = s.throttle
+  return {
+    platform: HOST_PLATFORM,
+    uptimeHours: Number.isFinite(s.uptimeSeconds) ? Math.floor(s.uptimeSeconds / 3600) : null,
+    cpuCount: s.cpuCount ?? null,
+    cpuPercent: pct(s.cpuPercent),
+    load1: Number.isFinite(s.loadAverage?.[0]) ? s.loadAverage[0] : null,
+    cpuTempC: pct(s.cpuTempC),
+    throttle: t ? {
+      healthy: Boolean(t.healthy),
+      now: THROTTLE_FLAGS.filter((f) => t[`${f}Now`]),
+      sinceBoot: THROTTLE_FLAGS.filter((f) => t[`${f}SinceBoot`]),
+    } : null,
+    memoryPercent: pct(s.memory?.usedPercent),
+    swapPercent: pct(s.swap?.usedPercent),
+    diskPercent: pct(s.disk?.usedPercent),
+    os: o && Number.isFinite(o.updates) ? {
+      updates: o.updates,
+      securityUpdates: Number.isFinite(o.securityUpdates) ? o.securityUpdates : null,
+      rebootRequired: Boolean(o.rebootRequired),
+      checkedHoursAgo: Number.isFinite(o.aptAgeHours ?? o.updatesAgeHours) ? Number((o.aptAgeHours ?? o.updatesAgeHours).toFixed(1)) : null,
+    } : null,
+  }
+}
+
+/** The other producers this host runs (Windows), so each gets its own public page. */
+function fleetPublicView() {
+  const rows = state.node?.localProducers
+  if (!Array.isArray(rows) || !rows.length) return undefined
+  return rows.map((r) => ({
+    address: typeof (r.address ?? r.rewardAddress) === 'string' && /^[0-9a-f]{40}$/i.test(r.address ?? r.rewardAddress) ? (r.address ?? r.rewardAddress).toLowerCase() : null,
+    network: r.network ?? null,
+    label: r.label ?? r.id ?? null,
+    cli: r.cliVersion ?? null,
+    interval: Number.isSafeInteger(r.interval) ? r.interval : null,
+    role: typeof r.role === 'string' ? r.role : null,
+    startedAt: typeof r.startedAt === 'string' ? r.startedAt : null,
+    health: r.health ?? (r.running === true ? 'running' : r.running === false ? (r.state ?? 'stopped') : null),
+  })).filter((r) => r.address)
+}
+
+/** Busy share of all CPUs since the previous call (Linux /proc via os.cpus). */
+let cpuPrev
+function cpuPercentSinceLast() {
+  const now = os.cpus().reduce((a, c) => { const t = c.times; a.idle += t.idle; a.total += t.user + t.nice + t.sys + t.irq + t.idle; return a }, { idle: 0, total: 0 })
+  const prev = cpuPrev; cpuPrev = now
+  if (!prev || now.total <= prev.total) return undefined
+  return Number((100 * (1 - (now.idle - prev.idle) / (now.total - prev.total))).toFixed(1))
+}
+
 function nodeView() {
   const v = eligibilityVerdict()
   if (v.category === 'none') return state.node
@@ -3436,6 +3563,7 @@ const snapshot = () => ({
   node: nodeView(),
   timePayload: timePayloadView(),
   release: { ...state.release, installed: state.node?.cliVersion, lag: versionLag(state.node?.cliVersion, state.release?.latest) },
+  software: softwareView(),
   // One board per response. It was being rebuilt three times -- once in the
   // payload and twice inside derived() -- over the same tally, for three
   // identical answers.
@@ -3521,6 +3649,15 @@ function publicView(board) {
     // A word, never the sentences behind it.
     status: overall().status,
     problemCount: overall().problems.length,
+
+    // The same 1 h / 24 h / 7 d standing every Oxyon surface leads with (API v1).
+    standing: state.standing?.ok || state.standing?.stale ? state.standing : undefined,
+    // What runs here and how healthy the machine is, in rounded figures only:
+    // versions, interval, percentages, counts and ages. Never a hostname, IP or path.
+    software: softwareView(),
+    host: hostPublicView(),
+    // Named onThisHost, never `fleet`: the dashboard's own fleet carries peer URLs.
+    ...(fleetPublicView() ? { onThisHost: fleetPublicView() } : {}),
 
     chain: state.chain?.ok ? {
       network: NETWORK,
@@ -3757,7 +3894,7 @@ const server = createServer(async (req, res) => {
 // Docker daemon, or a Pi. `overall` and `pollNode` in particular encode the
 // contract with xl1-collect.sh, which is where two silent failures have already
 // hidden.
-export { selfOvercount, attributedReward, historyBlock, backfillHistory, singleFlight, publicRewards, historyDoc, restoreHistory, initHistory, chainHistory, liveAttributed, STEP_REWARD_ADDRESS, protocolBlockReward, protocolProducerReward, recordedRewards, accountBlock, ledger, ledgerDoc, restoreLedger, rewardsView, exactXl1, REWARD_ERAS, eligibilityVerdict, nodeView, blocksSinceOwn, chainEvidence, ELIGIBILITY_CHAIN_BLOCKS, CHAIN_FRESH_MS, ELIGIBILITY_WARMUP_MS, nextReleaseDelay, CLI_RETRY_MS, CLI_CHECK_MS, formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, blockEpoch, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys, networkView, concentration, shareDrift, producerChurn, observeBatch, gapPercentile, chainObs, GAP_EDGES, sumDays, pollAlerts, prunePeers, peersEvicted, PEERS_MAX, fleetView, fleetSummary, fleetProducers, pollFleet, payloadSummary, timePayloadView, evmEndpoint, SLOW_PAYLOAD_MS, PAYLOAD_ALERT_SHARE, PAYLOAD_ALERT_MIN, fleet, FLEET, publicView, pollPrice, priceView, NO_MARKET, continuity, pollSystem, HOST_PLATFORM }
+export { standingView, softwareView, hostPublicView, fleetPublicView, selfOvercount, attributedReward, historyBlock, backfillHistory, singleFlight, publicRewards, historyDoc, restoreHistory, initHistory, chainHistory, liveAttributed, STEP_REWARD_ADDRESS, protocolBlockReward, protocolProducerReward, recordedRewards, accountBlock, ledger, ledgerDoc, restoreLedger, rewardsView, exactXl1, REWARD_ERAS, eligibilityVerdict, nodeView, blocksSinceOwn, chainEvidence, ELIGIBILITY_CHAIN_BLOCKS, CHAIN_FRESH_MS, ELIGIBILITY_WARMUP_MS, nextReleaseDelay, CLI_RETRY_MS, CLI_CHECK_MS, formatXl1, versionLag, decodeThrottle, mountRemedy, missingStatusReason, blockEpoch, perHour, overall, derived, envStr, envNum, pollNode, snapshot, state, history, trendDaily, loadTrend, trend, peerBoard, loadPeers, persistPeers, scanProduction, backfillDays, peers, production, days, dayKey, recentKeys, networkView, concentration, shareDrift, producerChurn, observeBatch, gapPercentile, chainObs, GAP_EDGES, sumDays, pollAlerts, prunePeers, peersEvicted, PEERS_MAX, fleetView, fleetSummary, fleetProducers, pollFleet, payloadSummary, timePayloadView, evmEndpoint, SLOW_PAYLOAD_MS, PAYLOAD_ALERT_SHARE, PAYLOAD_ALERT_MIN, fleet, FLEET, publicView, pollPrice, priceView, NO_MARKET, continuity, pollSystem, HOST_PLATFORM }
 
 // Only run as a server when executed directly, not when imported by a test.
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
@@ -3782,7 +3919,7 @@ if (isMain) {
   // The history and the live attribution must agree on where one hands over.
   if (chainHistory.attrSince !== undefined && production.attrSince === undefined) production.attrSince = chainHistory.attrSince
   if (peersError) console.warn(`xl1-dashboard: producer standings unavailable — ${peersError}`)
-  await Promise.all([pollChain(), pollHealth(), pollNode(), pollSystem(), pollRelease(), pollAlerts(), pollFleet(), pollPrice()])
+  await Promise.all([pollChain(), pollHealth(), pollNode(), pollSystem(), pollRelease(), pollAlerts(), pollFleet(), pollPrice(), pollStanding()])
   if (trendError) console.warn(`xl1-dashboard: long-range history unavailable — ${trendError}`)
 
   // Each poller catches internally, but a rejection escaping one of them would
@@ -3809,6 +3946,7 @@ if (isMain) {
   }
   scheduleRelease()
   if (PRICE_ID) setInterval(guard(pollPrice, 'pollPrice'), PRICE_POLL_MS).unref()
+  setInterval(guard(pollStanding, 'pollStanding'), STANDING_POLL_MS).unref()
   if (FLEET.peers.length) setInterval(guard(pollFleet, 'pollFleet'), FLEET_POLL_MS).unref()
 
   server.listen(PORT, BIND, () => {

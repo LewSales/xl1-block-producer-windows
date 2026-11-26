@@ -444,6 +444,30 @@ if (Test-Path $eligCache) {
   }
 }
 
+# ------------------------------------------------------------ producer config
+# The polling interval the RUNNING producer loaded, from the config the image
+# renders at start, not from the preset on disk (a preset edited without a
+# restart is not live). Only the number leaves: the rendered file also holds
+# the recovery phrase, so it is matched in place and never stored.
+function Get-ProducerInterval([string]$Name) {
+  $cfg = (Invoke-Docker exec $Name sh -c 'cat /tmp/xl1-preset.xyo.config.json' | Out-String)
+  if ($cfg -match '"blockProductionCheckInterval"\s*:\s*(\d+)') { return [int]$Matches[1] }
+  return $null
+}
+$cfgCache = Join-Path $StateDir '.producer-config'
+$cfgKey = "$Container $($f[2])"
+$cachedCfg = if (Test-Path $cfgCache) { (Get-Content $cfgCache -Raw) -split "`t" } else { @() }
+if ($cachedCfg.Count -ge 3 -and $cachedCfg[0] -eq $cfgKey) {
+  $doc.producerConfig = [ordered]@{ interval = [int]$cachedCfg[1]; role = $cachedCfg[2]; startedAt = $f[2] }
+} else {
+  $iv = Get-ProducerInterval $Container
+  $role = ("$(Invoke-Docker exec $Container printenv XL1_ROLE)".Trim() -replace '[^a-z0-9-]', '')
+  if ($iv) {
+    $doc.producerConfig = [ordered]@{ interval = $iv; role = $role; startedAt = $f[2] }
+    Set-Content -Path $cfgCache -Value "$cfgKey`t$iv`t$role" -NoNewline
+  }
+}
+
 # ----------------------------------------------------------------- cli version
 # Keyed on the image ID, not on elapsed time: the version can only change when
 # the container is recreated, and a cache keyed on the clock reported the old
@@ -624,7 +648,7 @@ if ((Get-CacheAge $fleetCache) -gt 300) {
   # Backtick strings, not double quotes: PowerShell 5.1 strips embedded double
   # quotes when it hands an argument to a native program, and the template then
   # matches nothing.
-  $envTpl = '{{range .Config.Env}}{{if or (eq (index (split . `=`) 0) `XL1_NETWORK`) (eq (index (split . `=`) 0) `XL1_REWARD_ADDRESS`) (eq (index (split . `=`) 0) `XL1_EVM_RPC_URL`)}}{{println .}}{{end}}{{end}}'
+  $envTpl = '{{range .Config.Env}}{{if or (eq (index (split . `=`) 0) `XL1_NETWORK`) (eq (index (split . `=`) 0) `XL1_REWARD_ADDRESS`) (eq (index (split . `=`) 0) `XL1_EVM_RPC_URL`) (eq (index (split . `=`) 0) `XL1_ROLE`)}}{{println .}}{{end}}{{end}}'
   foreach ($n in $names) {
     $i = Invoke-Docker inspect $n --format '{{.State.Status}}|{{.State.Running}}|{{.State.StartedAt}}|{{.RestartCount}}'
     if ($LASTEXITCODE -ne 0 -or -not $i) { continue }
@@ -656,6 +680,12 @@ if ((Get-CacheAge $fleetCache) -gt 300) {
       validationFailures = @($msg | Where-Object { $_ -like '*Block validation failed*' }).Count
       rejected           = @($msg | Where-Object { $_ -like '*No candidate block can be appended*' }).Count
       evmRpc             = [ordered]@{ host = $evmHost }
+      role               = $(if ($roleLine = "$($envLines | Where-Object { $_ -like 'XL1_ROLE=*' } | Select-Object -First 1)" -replace '^XL1_ROLE=', '') { $roleLine -replace '[^a-z0-9-]', '' } else { $null })
+    }
+    if ($p[1] -eq 'true') {
+      $row.interval = Get-ProducerInterval $n
+      $cv = (Invoke-Docker exec $n xl1 --version | Out-String)
+      if ($cv -match '(\d+\.\d+\.\d+)') { $row.cliVersion = $Matches[1] }
     }
     $tp = @($msg | ForEach-Object { if ($_ -match 'Generated time payload in (\d+)ms') { [int]$Matches[1] } } | Sort-Object)
     if ($tp.Count) {
