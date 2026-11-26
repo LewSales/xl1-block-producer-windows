@@ -132,8 +132,13 @@ if ((-not (Test-Path $SchemaStamp)) -or ((Get-Content $SchemaStamp -Raw).Trim() 
 # and only re-derived below if the inspect that follows fails against it.
 $autoResolved = -not $Container
 function Resolve-ProducerContainer {
-  $found = (Invoke-Docker ps -a --filter 'name=preset' --format '{{.Names}}' | Select-Object -First 1)
-  if ($found) { $found } else { 'xl1-node-preset-1' }
+  # The main node first. "The first *preset* container docker lists" became an
+  # extra producer (main-cc91, mainnet) once those existed, and the dashboard,
+  # which follows the main node's network, then showed another producer's CLI,
+  # logs and health beside its own chain figures.
+  $names = @(Invoke-Docker ps -a --filter 'name=preset' --format '{{.Names}}' | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+  if ($names -contains 'xl1-node-preset-1') { return 'xl1-node-preset-1' }
+  if ($names.Count) { $names[0] } else { 'xl1-node-preset-1' }
 }
 $containerCacheFile = Join-Path $StateDir '.container-name'
 if ($autoResolved) {
