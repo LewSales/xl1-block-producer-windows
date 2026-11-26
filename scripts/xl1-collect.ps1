@@ -209,6 +209,8 @@ if ($autoResolved) { Set-Content -Path $containerCacheFile -Value $Container -No
 
 $f = $inspect.Trim() -split '\|'
 $started = [datetime]::Parse($f[2])
+# Kept by name: $f is reused further down for other parsing.
+$containerStartedAt = $f[2]
 $up = (Get-Date) - $started.ToLocalTime()
 # [int] in PowerShell ROUNDS, it does not truncate, so a container up 1h31m
 # reported "2h 31m" -- an uptime that ran ahead of the truth by up to half an
@@ -455,15 +457,15 @@ function Get-ProducerInterval([string]$Name) {
   return $null
 }
 $cfgCache = Join-Path $StateDir '.producer-config'
-$cfgKey = "$Container $($f[2])"
+$cfgKey = "$Container $containerStartedAt"
 $cachedCfg = if (Test-Path $cfgCache) { (Get-Content $cfgCache -Raw) -split "`t" } else { @() }
 if ($cachedCfg.Count -ge 3 -and $cachedCfg[0] -eq $cfgKey) {
-  $doc.producerConfig = [ordered]@{ interval = [int]$cachedCfg[1]; role = $cachedCfg[2]; startedAt = $f[2] }
+  $doc.producerConfig = [ordered]@{ interval = [int]$cachedCfg[1]; role = $cachedCfg[2]; startedAt = $containerStartedAt }
 } else {
   $iv = Get-ProducerInterval $Container
   $role = ("$(Invoke-Docker exec $Container printenv XL1_ROLE)".Trim() -replace '[^a-z0-9-]', '')
   if ($iv) {
-    $doc.producerConfig = [ordered]@{ interval = $iv; role = $role; startedAt = $f[2] }
+    $doc.producerConfig = [ordered]@{ interval = $iv; role = $role; startedAt = $containerStartedAt }
     Set-Content -Path $cfgCache -Value "$cfgKey`t$iv`t$role" -NoNewline
   }
 }
