@@ -706,8 +706,15 @@ function kpiRow(d) {
 
   const blocksWon = dv.producedObserved !== undefined ? dv.producedObserved
     : (pb.self?.blocks !== undefined ? pb.self.blocks : undefined)
-  const rankVal = pb.selfRank !== undefined ? `#${num(pb.selfRank)}` : '—'
-  const rankSub = pb.selfRank !== undefined ? `of ${num(pb.producers)} producers` : 'not seen yet'
+  // The rank every Oxyon surface leads with: the last hour, as oxyon.io's API v1
+  // computes it, so this page, the Pi panel and oxyon.io/xl1 agree. The lifetime
+  // rank from this node's own scan follows, labelled.
+  const h1 = d.standing?.windows?.['1h']
+  const lifetime = pb.selfRank !== undefined ? `lifetime #${num(pb.selfRank)} of ${num(pb.producers)}` : null
+  const rankVal = h1?.rank ? `#${num(h1.rank)}` : pb.selfRank !== undefined ? `#${num(pb.selfRank)}` : '—'
+  const rankSub = h1?.rank
+    ? `last hour, of ${num(h1.of)}${d.standing.stale ? ' (stale)' : ''}${lifetime ? ` · ${lifetime}` : ''}`
+    : pb.selfRank !== undefined ? `lifetime, of ${num(pb.producers)} producers` : 'not seen yet'
   const last24 = bw.day24h
   const last24Sub = bw.day24h === undefined ? 'collecting'
     : bw.day24hComplete ? 'rolling 24h' : `${Math.round((bw.day24hSpanSeconds ?? 0) / 3600)}h so far`
@@ -1685,6 +1692,10 @@ function render(d) {
       <div class="sub">xl1&#8209;cli in the running container</div>
       ${dl([
         ['CLI version', `${lagCell} ${origin('official', d.build)}`],
+        // The interval the running producer loaded (read from its rendered config),
+        // the setting operators tune most and the one no other screen showed.
+        d.software?.interval && ['Polling interval', `<span class="mono">${num(d.software.interval)} ms</span>${d.software.role ? ` <span class="sub">${esc(d.software.role)}</span>` : ''}`],
+        d.software?.producerStartedAt && ['Producer started', `<span class="mono">${esc(new Date(d.software.producerStartedAt).toLocaleString())}</span>`],
         rel.ok === false && !rel.disabled && ['Registry', `<span class="warn">${esc(rel.error ?? 'unreachable')}</span>`],
         osi && ['Host updates', osi.updates > 0 ? `<span class="warn">${num(osi.updates)} pending</span>` : '<span class="ok">none pending</span>'],
         osi && osi.securityUpdates > 0 && ['Security updates', `<span class="bad">${num(osi.securityUpdates)}</span>`],
