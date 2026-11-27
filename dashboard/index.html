@@ -478,17 +478,29 @@ const opColour = (addr) => { const o = opOf(addr); return o.group === 'other' ? 
 // The block race, from the public race feed the network's observer publishes
 // (the same feed oxyon.io's producer pages read). Read straight from GitHub by the
 // browser; fetched once a minute, drawn on every render from the cached copy.
-const RACE_FEEDS = {
-  mainnet: 'https://raw.githubusercontent.com/LewSales/xl1-status-data/main/race-mainnet.json',
-  sequence: 'https://raw.githubusercontent.com/LewSales/xl1-status-data/main/race.json',
+// Since the telemetry rotation (2026-11): read from the active period repository AND the historical one, and keep the
+// newest copy that really is this network's race (same repositories and rule as oxyon.io's status-data.mjs).
+const RACE_REPOS = ['xl1-status-data-2026-11', 'xl1-status-data']
+const RACE_FILES = { mainnet: 'race-mainnet.json', sequence: 'race.json' }
+const RACE_FEEDS = RACE_FILES
+const raceStamp = (j) => typeof j?.generatedAt === 'number' ? j.generatedAt : (Date.parse(j?.generatedAt) || 0)
+const raceValid = (j, net) => !!j && j.network === net && Array.isArray(j.heights) && raceStamp(j) > 0 && raceStamp(j) <= Date.now() + 600000
+function fetchRace(net) {
+  return Promise.all(RACE_REPOS.map((repo) => fetch('https://raw.githubusercontent.com/LewSales/' + repo + '/main/' + RACE_FILES[net] + '?t=' + Date.now(), { cache: 'no-store' })
+    .then((r) => r.ok ? r.json() : null).catch(() => null)))
+    .then((copies) => {
+      let best = null
+      for (const j of copies) if (raceValid(j, net) && (!best || raceStamp(j) > raceStamp(best))) best = j
+      if (!best) throw new Error('no valid race feed in either telemetry repository')
+      return best
+    })
 }
 const RACE = { net: undefined, data: undefined, err: undefined, at: 0, busy: false }
 function maybeLoadRace(net) {
   if (typeof fetch !== 'function' || RACE.busy || !RACE_FEEDS[net] || (RACE.net === net && Date.now() - RACE.at < 60000)) return
   if (RACE.net !== net) { RACE.data = undefined; RACE.err = undefined }
   RACE.net = net; RACE.busy = true; RACE.at = Date.now()
-  fetch(RACE_FEEDS[net] + '?t=' + Date.now(), { cache: 'no-store' })
-    .then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json() })
+  fetchRace(net)
     .then((j) => { if (j.network && j.network !== net) throw new Error('race feed is for ' + j.network); RACE.data = j; RACE.err = undefined })
     .catch((e) => { RACE.err = e.message })
     .finally(() => { RACE.busy = false })
