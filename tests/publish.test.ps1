@@ -215,5 +215,40 @@ Payload 13; $o = Publish @('-DryRun')
 Check 'exit 0' $script:Rc 0
 Check 'no new commit' (Count) $n0
 
+# ---- credentials never persisted (Sprint 005 P1). SYNTHETIC token only, never a real one.
+$synth = 'github_pat_' + ('SYNTHx9' * 9)
+Write-Host '  the git token never lands in .git\config, the log or the output'
+Setup
+Add-Content -Path $Cfg -Value "`r`nXL1_PUBLISH_GIT_TOKEN=$synth" -Encoding ascii   # own line: the file has no final newline
+Payload 21; $o = Publish
+Check 'exit 0' $script:Rc 0
+$gc = Get-Content (Join-Path $Wc '.git\config') -Raw
+Hasnt 'no token in .git\config' 'SYNTHx9' $gc
+Hasnt 'no token in the log' 'SYNTHx9' (LogText)
+Hasnt 'no token in the output' 'SYNTHx9' $o
+
+Write-Host '  an older working copy with the token in its remote URL is cleaned on the next run'
+& git -C $Wc remote set-url origin "https://x-access-token:$synth@example.invalid/old.git" 2>&1 | Out-Null
+Has 'precondition: token was in .git\config' 'SYNTHx9' (Get-Content (Join-Path $Wc '.git\config') -Raw)
+Payload 22; $o = Publish
+Check 'exit 0' $script:Rc 0
+Hasnt 'token removed from .git\config' 'SYNTHx9' (Get-Content (Join-Path $Wc '.git\config') -Raw)
+Check 'remote is the plain URL' ((& git -C $Wc remote get-url origin).Trim()) $OriginUrl
+
+Write-Host '  GitAuthEnv: header for the https host only, helper off, nothing for ssh or local remotes'
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($Script, [ref]$null, [ref]$null)
+$fn = $ast.FindAll({ param($a) $a -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $a.Name -eq 'GitAuthEnv' }, $true) | Select-Object -First 1
+. ([scriptblock]::Create($fn.Extent.Text))
+$v = GitAuthEnv 'https://github.com/LewSales/xl1-status-data-2026-11.git' $synth
+Check 'two config entries' $v['GIT_CONFIG_COUNT'] '2'
+Check 'credential helper switched off' "[$($v['GIT_CONFIG_KEY_0'])=$($v['GIT_CONFIG_VALUE_0'])]" '[credential.helper=]'
+Check 'header scoped to the host' $v['GIT_CONFIG_KEY_1'] 'http.https://github.com/.extraheader'
+$b64 = ($v['GIT_CONFIG_VALUE_1'] -split ' ')[-1]
+Check 'basic credential decodes to the token' ([Text.Encoding]::ASCII.GetString([Convert]::FromBase64String($b64))) "x-access-token:$synth"
+Hasnt 'the token itself is not in any value as plain text' 'SYNTHx9' (($v.Values) -join ' ')
+Check 'ssh remote: nothing' (GitAuthEnv 'git@github.com:x/y.git' $synth).Count 0
+Check 'local remote: nothing' (GitAuthEnv $OriginUrl $synth).Count 0
+Check 'no token: nothing' (GitAuthEnv 'https://github.com/x/y.git' '').Count 0
+
 Remove-Item $Work -Recurse -Force -ErrorAction SilentlyContinue
 if ($script:Failed) { exit 1 } else { exit 0 }

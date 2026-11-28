@@ -97,8 +97,11 @@ $Repo    = Setting 'XL1_PUBLISH_REPO' ''
 # A PAT scoped to just this repo, used only for git itself (clone/fetch/push).
 # Task Scheduler's process has no console for Git Credential Manager to prompt
 # from and, run elevated, cannot even persist a credential to wincredman to
-# reuse next time -- it fails outright, every run, forever. Embedding this in
-# the remote URL bypasses the credential helper for this remote entirely.
+# reuse next time -- it fails outright, every run, forever. So git gets it as a
+# one-off Authorization header in its own child-process environment, with the
+# credential helper switched off for that call (GitAuthEnv). It is never put in
+# the remote URL (which git saves in .git\config), a git argument (visible in
+# the process list), a log line or the output.
 $GitToken = Setting 'XL1_PUBLISH_GIT_TOKEN' ''
 $Branch  = Setting 'XL1_PUBLISH_BRANCH' 'main'
 $SubPath = Setting 'XL1_PUBLISH_PATH' 'xl1/windows'
@@ -130,13 +133,25 @@ try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::
 # kills it.
 $env:GIT_TERMINAL_PROMPT = '0'
 
-# Insert the PAT into the URL so git authenticates without touching any
-# credential helper. Left alone (no token configured) when $Repo is not
-# https, so an ssh:// remote using its own key keeps working unchanged.
-function AuthenticatedRepoUrl { param([string]$RepoUrl, [string]$GitToken)
-  if (-not $GitToken -or $RepoUrl -notmatch '^https://') { return $RepoUrl }
-  return $RepoUrl -replace '^https://', "https://$GitToken@"
+# The PAT as environment for the git child process only (GIT_CONFIG_COUNT/KEY/
+# VALUE, git 2.31+): an Authorization header scoped to the repository's host and
+# an empty credential.helper, so git authenticates without any helper and
+# without the token ever reaching a URL, an argument or .git\config. Empty (no
+# token configured, or $Repo not https) leaves git alone, so an ssh:// remote
+# using its own key keeps working unchanged.
+function GitAuthEnv { param([string]$RepoUrl, [string]$GitToken)
+  $vars = [ordered]@{}
+  if (-not $GitToken -or $RepoUrl -notmatch '^(https://[^/@]+/)') { return $vars }
+  $basic = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("x-access-token:$GitToken"))
+  $vars['GIT_CONFIG_COUNT'] = '2'
+  $vars['GIT_CONFIG_KEY_0'] = 'credential.helper'
+  $vars['GIT_CONFIG_VALUE_0'] = ''
+  $vars['GIT_CONFIG_KEY_1'] = "http.$($Matches[1]).extraheader"
+  $vars['GIT_CONFIG_VALUE_1'] = "AUTHORIZATION: basic $basic"
+  return $vars
 }
+$GitAuth = GitAuthEnv $Repo $GitToken
+$GitAuthSecret = if ($GitAuth.Count) { ($GitAuth['GIT_CONFIG_VALUE_1'] -split ' ')[-1] } else { '' }
 
 # Bound every git step: a hung fetch or push must end this run, not hold the
 # next one off.
@@ -166,6 +181,7 @@ function Log { param([string]$m, [string]$level = '')
 function Scrub { param([string]$s)
   if (-not $s) { return '' }
   if ($GitToken) { $s = $s.Replace($GitToken, '<redacted>') }
+  if ($GitAuthSecret) { $s = $s.Replace($GitAuthSecret, '<redacted>') }
   $s = $s -replace '([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@\s]+@', '$1<redacted>@'
   $s = $s -replace '(gh[pousr]_|github_pat_)[A-Za-z0-9_]+', '<redacted>'
   $s = $s -replace '(?i)((token|password|passwd|secret|authorization|auth)\s*[=:]\s*)\S+', '$1<redacted>'
@@ -192,6 +208,9 @@ function G {
   $psi.RedirectStandardError = $true
   $psi.CreateNoWindow = $true
   $psi.WorkingDirectory = (Get-Location).Path
+  # Credentials for this one git process only; and no tracing that could print them.
+  foreach ($k in 'GIT_TRACE', 'GIT_TRACE_CURL', 'GIT_CURL_VERBOSE', 'GIT_TRACE_PACKET', 'GIT_TRACE2', 'GIT_TRACE2_EVENT', 'GIT_TRACE2_PERF') { [void]$psi.EnvironmentVariables.Remove($k) }
+  foreach ($k in $GitAuth.Keys) { $psi.EnvironmentVariables[$k] = $GitAuth[$k] }
   $p = [System.Diagnostics.Process]::Start($psi)
   $o = $p.StandardOutput.ReadToEndAsync(); $e = $p.StandardError.ReadToEndAsync()
   if (-not $p.WaitForExit($GitTimeoutSec * 1000)) {
@@ -298,14 +317,15 @@ try {
 if (-not (Test-Path $WorkDir)) { New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null }
 Push-Location $WorkDir
 try {
-  $authRepo = AuthenticatedRepoUrl $Repo $GitToken
+  # The plain URL: credentials travel in G's environment (GitAuthEnv). Setting it
+  # below also removes a token an older version of this script embedded there.
+  $authRepo = $Repo
   if (-not $haveRepo) {
     # Shallow and single-branch: this repository is a delivery mechanism, and
     # its history is of no use on a producer.
     if ((G clone --quiet --depth 1 --branch $Branch --single-branch $authRepo .) -ne 0) { Log "clone of $Repo failed: $script:GitErr"; exit 1 }
   }
-  # Idempotent: keeps an already-cloned working copy in step with a token that
-  # was added, rotated, or removed from config since the clone.
+  # Idempotent: keeps an already-cloned working copy's remote on the plain URL.
   G remote set-url origin $authRepo | Out-Null
   G config user.name $Name | Out-Null
   G config user.email $Email | Out-Null
